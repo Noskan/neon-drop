@@ -11,8 +11,8 @@
 // pede ações (abrir caixa, vender, forjar, prestigiar) e desenha o estado que o servidor devolve.
 
 window.NEON_DROP_BACKEND_CONFIG = {
-  SUPABASE_URL: 'https://tyovbizpnmhntrlsuduo.supabase.co',
-  SUPABASE_ANON_KEY: 'sb_publishable_vx52595_GT8VP7dq02KZxA_X2udDG9k',
+  SUPABASE_URL: 'https://mywlmdlrfewpmehqaghf.supabase.co', // região South America (São Paulo)
+  SUPABASE_ANON_KEY: 'sb_publishable_VAXvcIXVxk96mXDBI1eEyg_3KoCbjC9',
 };
 
 const NEON_DROP_SESSION_KEY = 'neondrop_sb_session_v1';
