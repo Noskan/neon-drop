@@ -2040,7 +2040,7 @@ function renderInventory() {
           <button class="btn-heirloom equip-aim-btn ${isEquipped ? 'locked' : ''}" title="Equipar esta arma/faca no Treino 2D (Aim Lab)">${isEquipped ? '🎯 Equipada' : '🎯 Equipar'}</button>
           ${
             isTitular
-              ? `<button class="btn-heirloom ${lockedHeirloom ? 'locked' : ''}" title="Proteger esta skin com Token de Herança Permanente (sobrevive ao reset de Prestígio)">${lockedHeirloom ? '🔒' : '🔓'}</button>`
+              ? `<button class="btn-heirloom toggle-heirloom-btn ${lockedHeirloom ? 'locked' : ''}" title="Proteger esta skin com Token de Herança Permanente (sobrevive ao reset de Prestígio)">${lockedHeirloom ? '🔒' : '🔓'}</button>`
               : ''
           }
           <button class="btn-danger sell-single-btn" ${lockedHeirloom ? 'disabled title="Desbloqueie a Herança antes de vender"' : ''}>Vender</button>
@@ -2053,7 +2053,7 @@ function renderInventory() {
         renderInventory();
         renderAimLabLoadout();
       });
-      card.querySelectorAll('.btn-heirloom')[1]?.addEventListener('click', () => {
+      card.querySelector('.toggle-heirloom-btn')?.addEventListener('click', () => {
         toggleHeirloomUid(item.uid);
       });
       card.querySelector('.sell-single-btn').addEventListener('click', () => {
@@ -2125,6 +2125,7 @@ function renderInventory() {
       const bestInst = catItem.instances[0];
       const worstInst = catItem.instances[catItem.instances.length - 1];
       const lockedHeirloom = isHeirloom(bestInst.uid);
+      const isEquipped = getEquippedWeaponItem()?.uid === bestInst.uid;
       const mMult = caseMultMap.get(catItem.sourceCaseId) || 1.0;
       const passiveRate = getItemPassiveRate(bestInst, mMult);
       const perfectionBadges = [
@@ -2141,11 +2142,19 @@ function renderInventory() {
         <div class="passive-mini-tag">+${formatMoney(passiveRate)} /s</div>
         <div class="item-price">${formatMoney(bestInst.price)}</div>
         <div class="item-card-actions dual">
-          <button class="btn-heirloom ${lockedHeirloom ? 'locked' : ''}" title="Proteger como Herança Permanente">${lockedHeirloom ? '🔒' : '🔓'}</button>
-          <button class="btn-danger sell-one-col-btn" ${catItem.ownedCount === 1 && lockedHeirloom ? 'disabled' : ''}>Vender ${catItem.ownedCount > 1 ? 'Duplicada' : 'Item'}</button>
+          <button class="btn-heirloom equip-aim-btn ${isEquipped ? 'locked' : ''}" title="Equipar no Treino 2D">${isEquipped ? '🎯 Equipada' : '🎯 Equipar'}</button>
+          <button class="btn-heirloom toggle-heirloom-btn ${lockedHeirloom ? 'locked' : ''}" title="Proteger como Herança Permanente">${lockedHeirloom ? '🔒' : '🔓'}</button>
+          <button class="btn-danger sell-one-col-btn" ${catItem.ownedCount === 1 && lockedHeirloom ? 'disabled' : ''}>Vender</button>
         </div>
       `;
-      card.querySelector('.btn-heirloom')?.addEventListener('click', () => {
+      card.querySelector('.equip-aim-btn')?.addEventListener('click', () => {
+        state.equippedUid = bestInst.uid;
+        sfx.coin();
+        saveState();
+        renderInventory();
+        renderAimLabLoadout();
+      });
+      card.querySelector('.toggle-heirloom-btn')?.addEventListener('click', () => {
         toggleHeirloomUid(bestInst.uid);
       });
       card.querySelector('.sell-one-col-btn').addEventListener('click', () => {
@@ -3101,7 +3110,7 @@ function spawnSingleAimTarget() {
   bullseye.className = 'aimlab-bullseye';
   target.appendChild(bullseye);
 
-  target.addEventListener('mousedown', (e) => {
+  target.addEventListener('pointerdown', (e) => {
     e.stopPropagation();
     const isCrit = e.target === bullseye;
     handleAimTargetHit(target, x, y, isCrit);
@@ -3180,7 +3189,7 @@ function handleAimTargetHit(targetEl, x, y, isCrit) {
 }
 
 // Background click on stage = missed shot (resets combo streak)
-document.getElementById('aimlab-stage')?.addEventListener('mousedown', (e) => {
+document.getElementById('aimlab-stage')?.addEventListener('pointerdown', (e) => {
   if (e.target.closest('.aimlab-banner-overlay') || e.target.closest('.aimlab-target')) return;
   if (aimMode === 'gridshot' && !gridshotActive) return;
 
@@ -3206,7 +3215,10 @@ function startGridshotChallenge() {
   aimSessionShots = 0;
 
   const banner = document.getElementById('aimlab-banner-overlay');
-  if (banner) banner.classList.add('hidden');
+  if (banner) {
+    banner.classList.add('hidden');
+    banner.style.display = 'none';
+  }
 
   const layer = document.getElementById('aimlab-targets-layer');
   if (layer) layer.innerHTML = '';
@@ -3269,7 +3281,10 @@ function endGridshotChallenge() {
   if (btnEl) {
     btnEl.textContent = '⚡ JOGAR GRIDSHOT NOVAMENTE (30s)';
   }
-  if (banner) banner.classList.remove('hidden');
+  if (banner) {
+    banner.classList.remove('hidden');
+    banner.style.display = 'flex';
+  }
 }
 
 document.getElementById('aimlab-weapon-select')?.addEventListener('change', (e) => {
@@ -3304,10 +3319,14 @@ document.querySelectorAll('#aimlab-mode-group .col-filter-btn').forEach((btn) =>
           'Destrua o máximo de alvos 2D em 30 segundos! Sua pontuação vai direto para o Ranking Global.';
         document.getElementById('aimlab-banner-btn').textContent = '⚡ COMEÇAR GRIDSHOT (30s)';
         banner.classList.remove('hidden');
+        banner.style.display = 'flex';
       }
     } else {
       if (startBtn) startBtn.style.display = 'none';
-      if (banner) banner.classList.add('hidden');
+      if (banner) {
+        banner.classList.add('hidden');
+        banner.style.display = 'none';
+      }
       ensureAimTargetsCount(3);
     }
     updateAimLabHUD();
@@ -3398,6 +3417,7 @@ updateTopBar();
 renderCaseSelector();
 renderActiveCaseArena();
 renderInventory();
+renderAimLabLoadout();
 checkOfflineEarnings();
 fetchGlobalLeaderboard();
 initLeaderboardLiveStream();
