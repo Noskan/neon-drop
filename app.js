@@ -795,7 +795,7 @@ function populateCatalogDropdown(tierFilter = document.getElementById('tier-filt
 
   const invCaseSelect = document.getElementById('inv-case-select');
   if (invCaseSelect) {
-    const prevVal = invCaseSelect.value || 'CURRENT';
+    const prevVal = invCaseSelect.value || 'ALL';
     invCaseSelect.innerHTML = `
       <option value="CURRENT">Caixa Atual (${activeCase.name})</option>
       <option value="FEATURED">Caixas Exibidas (${FEATURED_CASES.length})</option>
@@ -1496,13 +1496,42 @@ function showOfflineEarningsModal(elapsedSec, earned, capHours) {
   if (timeEl) timeEl.textContent = timeStr;
   if (capEl) capEl.textContent = `${capHours}h`;
   if (earnedEl) earnedEl.textContent = `+${formatMoney(earned)}`;
-  if (modal) modal.classList.remove('hidden');
+  openModal(modal, '#offline-claim-btn');
 }
 
 document.getElementById('offline-claim-btn')?.addEventListener('click', () => {
   sfx.coin();
-  document.getElementById('offline-modal')?.classList.add('hidden');
+  closeModal(document.getElementById('offline-modal'));
 });
+
+// =====================================================
+// MODAIS
+// Enquanto um modal está aberto, o resto da página fica inerte (sem foco, clique ou teclado):
+// um Enter com o foco ainda no botão ABRIR não pode abrir outra caixa por trás do modal.
+// =====================================================
+function isAnyModalOpen() {
+  return document.querySelector('.modal-backdrop:not(.hidden)') !== null;
+}
+
+function syncModalBackground() {
+  const open = isAnyModalOpen();
+  document.querySelectorAll('.topbar, .app-shell').forEach((el) => {
+    el.inert = open;
+  });
+}
+
+function openModal(modal, focusSelector = 'button') {
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  syncModalBackground();
+  modal.querySelector(focusSelector)?.focus();
+}
+
+function closeModal(modal) {
+  if (!modal) return;
+  modal.classList.add('hidden');
+  syncModalBackground();
+}
 
 // =====================================================
 // UI RENDERING
@@ -1676,7 +1705,7 @@ function createRouletteTile(item) {
 // MULTI-ROULETTE SPIN ENGINE
 // =====================================================
 function spinRoulette() {
-  if (isSpinning) return;
+  if (isSpinning || isAnyModalOpen()) return;
   const totalCost = Number((getEffectiveCasePrice(activeCase) * multiCount).toFixed(2));
   if (state.balance < totalCost) {
     alert(`Saldo insuficiente para abrir ${multiCount}x (${formatMoney(totalCost)})! Aguarde sua Renda Passiva ($/s) ou venda itens duplicados.`);
@@ -1867,7 +1896,8 @@ function showRewardModal(items) {
 
   document.getElementById('reward-total-price').textContent = formatMoney(totalVal);
   document.getElementById('modal-sell-val').textContent = formatMoney(totalVal);
-  modal.classList.remove('hidden');
+  // Foco em "Guardar": a ação que não gasta nem vende nada
+  openModal(modal, '#modal-keep-btn');
 }
 
 document.getElementById('modal-keep-btn').addEventListener('click', () => {
@@ -1878,7 +1908,7 @@ document.getElementById('modal-keep-btn').addEventListener('click', () => {
     renderCaseSelector();
     renderActiveCaseArena();
     renderInventory();
-    document.getElementById('reward-modal').classList.add('hidden');
+    closeModal(document.getElementById('reward-modal'));
     return;
   }
   if (currentUnboxedBatch.length) {
@@ -1891,7 +1921,7 @@ document.getElementById('modal-keep-btn').addEventListener('click', () => {
     renderInventory();
     publishMyScoreToCloud(false);
   }
-  document.getElementById('reward-modal').classList.add('hidden');
+  closeModal(document.getElementById('reward-modal'));
 });
 
 document.getElementById('modal-sell-btn').addEventListener('click', async () => {
@@ -1899,7 +1929,7 @@ document.getElementById('modal-sell-btn').addEventListener('click', async () => 
     if (server.busy) return;
     const uids = currentUnboxedBatch.map((i) => i.uid);
     currentUnboxedBatch = [];
-    document.getElementById('reward-modal').classList.add('hidden');
+    closeModal(document.getElementById('reward-modal'));
     const res = uids.length ? await sellItemsOnServer(uids) : null;
     if (res && Number(res.gained) > 0) sfx.coin();
     // Se a venda falhou, os itens simplesmente continuam guardados na coleção
@@ -1919,16 +1949,16 @@ document.getElementById('modal-sell-btn').addEventListener('click', async () => 
     updateTopBar();
     publishMyScoreToCloud(false);
   }
-  document.getElementById('reward-modal').classList.add('hidden');
+  closeModal(document.getElementById('reward-modal'));
 });
 
 // =====================================================
-// INVENTORY & COLLECTION SYSTEM (Owned / Not Owned / All)
+// INVENTORY & COLLECTION SYSTEM (Obtidas / Faltando / Todas)
 // =====================================================
 let collectionFilter = 'owned'; // 'owned' | 'not-owned' | 'all'
 
 function getScopedCases() {
-  const scopeVal = document.getElementById('inv-case-select')?.value || 'CURRENT';
+  const scopeVal = document.getElementById('inv-case-select')?.value || 'ALL';
   if (scopeVal === 'CURRENT') return [activeCase];
   if (scopeVal === 'FEATURED') return FEATURED_CASES;
   if (scopeVal === 'ALL') return ALL_CASES;
@@ -1959,7 +1989,7 @@ function getScopedCatalogItems() {
 }
 
 function updateCollectionProgressUI() {
-  const scopeVal = document.getElementById('inv-case-select')?.value || 'CURRENT';
+  const scopeVal = document.getElementById('inv-case-select')?.value || 'ALL';
   const scopeLabel =
     scopeVal === 'CURRENT'
       ? activeCase.name
@@ -1993,15 +2023,21 @@ function updateCollectionProgressUI() {
 
 function jumpToCaseAndOpenTab(caseId) {
   const target = ALL_CASES.find((c) => c.id === caseId);
-  if (target) {
+  if (target && !isSpinning) {
     activeCase = target;
-    if (!FEATURED_CASES.some((f) => f.id === target.id)) {
-      FEATURED_CASES[FEATURED_CASES.length - 1] = target;
+    const tierSelect = document.getElementById('tier-filter-select');
+    if (tierSelect && tierSelect.value !== 'ALL' && Number(tierSelect.value) !== target.tier) {
+      // O filtro estava em outro Tier: acompanha a caixa, senão o seletor ficaria sem a opção dela
+      tierSelect.value = String(target.tier);
+      applyTierFilter(tierSelect.value);
+    } else {
+      if (!FEATURED_CASES.some((f) => f.id === target.id)) {
+        FEATURED_CASES[FEATURED_CASES.length - 1] = target;
+      }
+      populateCatalogDropdown();
+      renderCaseSelector();
+      renderActiveCaseArena();
     }
-    const allSelect = document.getElementById('all-cases-select');
-    if (allSelect) allSelect.value = target.id;
-    renderCaseSelector();
-    renderActiveCaseArena();
   }
   document.querySelector('.tab-btn[data-tab="cases"]')?.click();
 }
@@ -2109,7 +2145,7 @@ function renderInventory() {
   updateDuplicatesUI();
 
   const sortMode = document.getElementById('inv-sort-select').value;
-  const scopeVal = document.getElementById('inv-case-select')?.value || 'CURRENT';
+  const scopeVal = document.getElementById('inv-case-select')?.value || 'ALL';
   const scopedCases = getScopedCases();
   const scopedCaseIds = new Set(scopedCases.map((c) => c.id));
 
@@ -2139,7 +2175,7 @@ function renderInventory() {
     });
 
     if (items.length === 0) {
-      grid.innerHTML = `<p style="color: var(--text-muted); grid-column: 1/-1; text-align:center; padding: 32px;">Nenhum item "Owned" neste filtro. Abra caixas ou mude para "Not Owned" / "All"!</p>`;
+      grid.innerHTML = `<p style="color: var(--text-muted); grid-column: 1/-1; text-align:center; padding: 32px;">Nenhuma skin obtida neste filtro. Abra caixas ou mude para "Faltando" / "Todas"!</p>`;
       return;
     }
 
@@ -2325,7 +2361,7 @@ function sellItemByUid(uid) {
   renderTradeUp();
 }
 
-// Collection Filter Buttons (Owned, Not Owned, All)
+// Collection Filter Buttons (Obtidas, Faltando, Todas)
 document.querySelectorAll('#collection-filter-group .col-filter-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('#collection-filter-group .col-filter-btn').forEach((b) => b.classList.remove('active'));
@@ -3189,6 +3225,9 @@ const AIM_RARITY_MULTS = {
   gold: 2.20,
 };
 
+const AIM_COMBO_MAX = 2.0; // teto do multiplicador de combo (o servidor valida o mesmo teto)
+const AIM_TARGET_LIFETIME_MS = 1350; // um alvo não atingido some depois disso e zera o combo
+
 let aimStreak = 0;
 let aimSessionHits = 0;
 let aimSessionShots = 0;
@@ -3237,7 +3276,7 @@ function getAimWeaponMultiplierInfo() {
 }
 
 function getAimComboMultiplier() {
-  return Math.min(2.0, Number((1 + Math.floor(aimStreak / 3) * 0.1).toFixed(2)));
+  return Math.min(AIM_COMBO_MAX, Number((1 + Math.floor(aimStreak / 3) * 0.1).toFixed(2)));
 }
 
 function getGridshotRankAndReward(score = gridshotScore) {
@@ -3450,7 +3489,7 @@ function spawnSingleAimTarget() {
       updateAimLabHUD();
       ensureAimTargetsCount(3);
     }
-  }, 1350);
+  }, AIM_TARGET_LIFETIME_MS);
 
   target.addEventListener('pointerdown', (e) => {
     e.stopPropagation();
@@ -3592,10 +3631,7 @@ async function startGridshotChallenge() {
   if (startBtn) startBtn.disabled = true;
 
   const banner = document.getElementById('aimlab-banner-overlay');
-  if (banner) {
-    banner.classList.add('hidden');
-    banner.style.display = 'none';
-  }
+  if (banner) banner.classList.add('hidden');
 
   const layer = document.getElementById('aimlab-targets-layer');
   if (layer) layer.innerHTML = '';
@@ -3673,10 +3709,7 @@ function showGridshotBanner(title, desc) {
   const descEl = document.getElementById('aimlab-banner-desc');
   if (titleEl) titleEl.textContent = title;
   if (descEl) descEl.textContent = desc;
-  if (banner) {
-    banner.classList.remove('hidden');
-    banner.style.display = 'flex';
-  }
+  if (banner) banner.classList.remove('hidden');
 }
 
 // Modo servidor: a recompensa, o XP e o recorde só existem se submit_gridshot_rpc aceitar
@@ -3945,16 +3978,16 @@ function showServerOverlay(title, desc = '', onRetry = null) {
     `;
     document.body.appendChild(el);
   }
-  el.classList.remove('hidden');
   document.getElementById('server-overlay-title').textContent = title;
   document.getElementById('server-overlay-desc').textContent = desc;
   const retryBtn = document.getElementById('server-overlay-retry');
   retryBtn.style.display = onRetry ? '' : 'none';
   retryBtn.onclick = onRetry;
+  openModal(el, '#server-overlay-retry');
 }
 
 function hideServerOverlay() {
-  document.getElementById('server-overlay')?.classList.add('hidden');
+  closeModal(document.getElementById('server-overlay'));
 }
 
 // ---------- Chamadas ao servidor ----------
@@ -4316,7 +4349,53 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
   });
 });
 
+// Textos da página que dependem de constantes do jogo: saem daqui, não de cópias no HTML
+function renderStaticGameFacts() {
+  const setText = (id, text) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  };
+  const wholeDollars = (v) => '$' + Number(v).toLocaleString('en-US');
+  const totalSkins = ALL_CASES.reduce((sum, c) => sum + c.items.length, 0);
+  const shapeCount = new Set(ALL_CASES.flatMap((c) => c.items.map((i) => i.shape))).size;
+
+  setText('api-status-badge', `✓ ${ALL_CASES.length} Caixas Táticas Originais • ${totalSkins} Skins HD`);
+  setText('catalog-facts-pill', `100% IP Original • ${shapeCount} Silhuetas • SyncTrack™`);
+
+  const tierSelect = document.getElementById('tier-filter-select');
+  if (tierSelect) {
+    const tiers = [...new Set(ALL_CASES.map((c) => c.tier))].sort((a, b) => a - b);
+    tierSelect.innerHTML =
+      `<option value="ALL">Todos os Tiers (Destaques T${tiers[0]}–T${tiers[tiers.length - 1]})</option>` +
+      tiers
+        .map((t) => {
+          const list = ALL_CASES.filter((c) => c.tier === t);
+          const prices = list.map((c) => c.price);
+          return `<option value="${t}">Tier ${t} — ${list[0].tierName} (${wholeDollars(Math.min(...prices))} – ${wholeDollars(Math.max(...prices))})</option>`;
+        })
+        .join('');
+    // O jogo sempre inicia em "Todos": não herda o valor que o navegador guardou do acesso anterior
+    tierSelect.value = 'ALL';
+  }
+
+  const oddsEl = document.getElementById('odds-pills');
+  if (oddsEl) {
+    oddsEl.innerHTML = RARITY_ORDER.map((r) => {
+      const label = RARITIES[r].name.replace(/\s*\(.*\)$/, '');
+      return `<span class="pill rarity-${r}">${label} ${RARITIES[r].weight}%</span>`;
+    }).join('');
+  }
+
+  setText('aimlab-combo-label', `🔥 COMBO (MÁX ${AIM_COMBO_MAX.toFixed(1)}x)`);
+  // Todo Rank paga: C é proporcional à pontuação; B, A e S têm pagamento fixo crescente
+  setText(
+    'aimlab-banner-desc',
+    `Alvos expiram em ${AIM_TARGET_LIFETIME_MS / 1000}s! A rodada de 30 segundos paga conforme o Rank: no Rank C o pagamento é proporcional à pontuação, e os Ranks B, A e S pagam cada vez mais. Você também ganha XP Militar e pode registrar seu recorde no Ranking Global.`
+  );
+}
+
 // Initialize 100% Original Tactical Arsenal & Migrate Legacy Saves
+renderStaticGameFacts();
 migrateAndRebalanceInventory();
 populateCatalogDropdown();
 updateTopBar();

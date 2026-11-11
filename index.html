@@ -6,8 +6,10 @@
   <title>NEON DROP // Tactical Case &amp; Idle Collection</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <!-- Servidor do jogo: mesma origem de SUPABASE_URL em backend-adapter.js -->
+  <link rel="preconnect" href="https://mywlmdlrfewpmehqaghf.supabase.co" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=20261111_12" />
+  <link rel="stylesheet" href="style.css?v=20261111_13" />
 </head>
 <body>
   <!-- Sticky Top Nav (1win Design Language) -->
@@ -16,7 +18,7 @@
       <span class="logo-icon">◈</span>
       <div>
         <h1>NEON<span>DROP</span></h1>
-        <small id="api-status-badge">✓ 18 Caixas Táticas Originais • 252 Skins HD</small>
+        <small id="api-status-badge">✓ Caixas Táticas Originais</small>
       </div>
     </div>
 
@@ -27,7 +29,7 @@
         <div class="rank-hud-info">
           <div class="pity-label">
             <strong id="top-rank-title" style="color: var(--ink);">Nv. 1 • Soldado</strong>
-            <span id="top-xp-text">0 / 150 XP</span>
+            <span id="top-xp-text">—</span>
           </div>
           <div class="pity-track">
             <div class="pity-fill xp-fill" id="top-xp-fill" style="width: 0%"></div>
@@ -95,14 +97,9 @@
         <div class="catalog-bar">
           <div class="catalog-left">
             <span class="catalog-label">Filtrar Tier</span>
-            <select id="tier-filter-select" class="select-input" title="Filtrar as caixas exibidas por Tier de preço">
-              <option value="ALL">Todos os Tiers (Destaques T1–T6)</option>
-              <option value="1">Tier 1 — Recruta ($25 – $45)</option>
-              <option value="2">Tier 2 — Operador ($120 – $220)</option>
-              <option value="3">Tier 3 — Especialista ($550 – $950)</option>
-              <option value="4">Tier 4 — Comandante ($2.400 – $4.200)</option>
-              <option value="5">Tier 5 — Mestre ($10.500 – $18.000)</option>
-              <option value="6">Tier 6 — Lenda ($38.000 – $65.000)</option>
+            <!-- As opções de Tier (nome e faixa de preço) são geradas do catálogo em app.js -->
+            <select id="tier-filter-select" class="select-input" autocomplete="off" title="Filtrar as caixas exibidas por Tier de preço">
+              <option value="ALL">Todos os Tiers</option>
             </select>
 
             <span class="catalog-label" style="margin-left: 8px;">Caixa</span>
@@ -111,7 +108,7 @@
             </select>
           </div>
           <div class="catalog-right">
-            <span class="pill-outline">100% IP Original • 16 Silhuetas • SyncTrack™</span>
+            <span class="pill-outline" id="catalog-facts-pill">100% IP Original • SyncTrack™</span>
           </div>
         </div>
 
@@ -162,13 +159,8 @@
           <div class="case-contents-section">
             <div class="section-title-row">
               <h3>Arsenal &amp; Lâminas nesta Caixa (<span id="case-items-count">0</span>)</h3>
-              <div class="odds-pills">
-                <span class="pill rarity-blue">Padrão 75%</span>
-                <span class="pill rarity-purple">Tático 16%</span>
-                <span class="pill rarity-pink">Protótipo 5.5%</span>
-                <span class="pill rarity-red">Relíquia 2.5%</span>
-                <span class="pill rarity-gold">★ Apex Mítico 1.0%</span>
-              </div>
+              <!-- Probabilidades geradas de RARITIES em app.js -->
+              <div class="odds-pills" id="odds-pills"></div>
             </div>
             <div class="case-items-grid" id="case-items-grid"></div>
           </div>
@@ -184,7 +176,7 @@
             </div>
             <div class="collection-progress-widget">
               <div class="collection-progress-label">
-                <span>Coleção (<span id="collection-scope-name">Caixa Atual</span>):</span>
+                <span>Coleção (<span id="collection-scope-name">Global</span>):</span>
                 <strong id="collection-progress-text">0 / 0 (0%)</strong>
               </div>
               <div class="pity-track">
@@ -194,11 +186,11 @@
           </div>
 
           <div class="inv-actions">
-            <!-- 3 Collection Filter Options: Owned, Not Owned, All -->
+            <!-- 3 filtros da coleção: obtidas, faltando, todas -->
             <div class="collection-filter-group" id="collection-filter-group">
-              <button class="col-filter-btn active" data-filter="owned">Owned</button>
-              <button class="col-filter-btn" data-filter="not-owned">Not Owned</button>
-              <button class="col-filter-btn" data-filter="all">All</button>
+              <button class="col-filter-btn active" data-filter="owned">Obtidas</button>
+              <button class="col-filter-btn" data-filter="not-owned">Faltando</button>
+              <button class="col-filter-btn" data-filter="all">Todas</button>
             </div>
 
             <select id="inv-case-select" class="select-input" title="Filtrar coleção por caixa">
@@ -252,7 +244,7 @@
               <div class="barracks-xp-wrap">
                 <div class="pity-label">
                   <span>Progresso da Patente Militar</span>
-                  <strong id="barracks-xp-text" style="color: var(--secondary);">0 / 150 XP</strong>
+                  <strong id="barracks-xp-text" style="color: var(--secondary);">—</strong>
                 </div>
                 <div class="pity-track" style="height: 8px;">
                   <div class="pity-fill xp-fill" id="barracks-xp-fill" style="width: 0%"></div>
@@ -379,7 +371,7 @@
         <!-- Live Telemetry Strip -->
         <div class="aimlab-hud-strip">
           <div class="aimlab-stat-box">
-            <span>🔥 COMBO (MÁX 2.0x)</span>
+            <span id="aimlab-combo-label">🔥 COMBO</span>
             <strong id="aimlab-combo-text" style="color: var(--primary);">1.00x (0 seguidos)</strong>
           </div>
           <div class="aimlab-stat-box">
@@ -399,9 +391,9 @@
         <!-- 2D Tactical Shooting Range Arena -->
         <div class="aimlab-stage" id="aimlab-stage">
           <div class="aimlab-grid-overlay"></div>
-          <div class="aimlab-banner-overlay" id="aimlab-banner-overlay" style="display: flex;">
+          <div class="aimlab-banner-overlay" id="aimlab-banner-overlay">
             <h2 id="aimlab-banner-title">⚡ DESAFIO GRIDSHOT 30s</h2>
-            <p id="aimlab-banner-desc">Alvos expiram em 1.35s! Alcance Rank S, A ou B em 30 segundos para receber o pagamento da rodada, XP Militar e registrar seu recorde no Ranking Global.</p>
+            <p id="aimlab-banner-desc"></p>
             <button id="aimlab-banner-btn" class="btn-open" style="margin-top: 12px;">⚡ COMEÇAR GRIDSHOT (30s)</button>
           </div>
           <div class="aimlab-targets-layer" id="aimlab-targets-layer"></div>
@@ -445,7 +437,7 @@
     </div>
   </div>
 
-  <script src="backend-adapter.js?v=20261111_12"></script>
-  <script src="app.js?v=20261111_12"></script>
+  <script src="backend-adapter.js?v=20261111_13"></script>
+  <script src="app.js?v=20261111_13"></script>
 </body>
 </html>

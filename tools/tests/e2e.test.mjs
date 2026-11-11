@@ -286,6 +286,19 @@ const seed = async (bridge, uid, where, copies = 1, extra = '') => {
   await p.tab('aimlab');
   await page.clock.runFor(200);
   const before = await prof();
+  const bannerDisplay = () => page.evaluate(() => getComputedStyle(document.getElementById('aimlab-banner-overlay')).display);
+  ok((await bannerDisplay()) === 'flex' && /Rank C/.test(await page.textContent('#aimlab-banner-desc')) && /1\.35s/.test(await page.textContent('#aimlab-banner-desc')),
+    'intro banner is visible and states that every rank pays (C proportionally)', await page.textContent('#aimlab-banner-desc'));
+  await page.click('#aimlab-start-gridshot-btn');
+  await until(() => page.evaluate(() => gridshotActive));
+  ok((await bannerDisplay()) === 'none', 'banner is hidden during the round by the class alone (no inline style)');
+  await page.evaluate(() => { endGridshotChallenge(); });
+  await until(async () => /NÃO VALIDADA/.test(await page.textContent('#aimlab-banner-title')));
+  await p.idle();
+  await bridge.sql(`UPDATE public.profiles SET next_gridshot_allowed_at = now() WHERE id = $1`, [uid]);
+  await bridge.sql(`DELETE FROM public.gridshot_sessions WHERE user_id = $1`, [uid]);
+  await page.clock.runFor(16000);
+  ok((await bannerDisplay()) === 'flex', 'banner comes back when the round ends');
   ok(await round(12, 3), 'round starts only after the server opened a session');
   ok((await one(bridge, `SELECT count(*)::int n FROM public.gridshot_sessions WHERE user_id = $1`, [uid])).n === 1, 'session row exists on the server');
   const title = await banner(/NOVO RECORDE|FIM DO GRIDSHOT/);
@@ -299,7 +312,9 @@ const seed = async (bridge, uid, where, copies = 1, extra = '') => {
   console.log(`      round score ${score} -> expected reward $${expected}`);
   ok(!!title && sub && sub.p_hits === 15 && sub.p_crits === 3 && sub.p_equipped_uid === gun && sub.p_score === score, 'telemetry sent: hits, bullseyes, score and the equipped weapon', JSON.stringify(sub));
   ok(after.best === score && after.hits === 15 && after.xp - before.xp === 12 * 2 + 3 * 4, 'server recorded the score, the 15 targets and the XP', JSON.stringify(after));
-  ok(after.balance - before.balance >= expected - 0.01 && after.balance - before.balance < expected + 0.5, 'server paid the round reward with the weapon multiplier', `${after.balance - before.balance} vs ${expected}`);
+  // The balance also carries idle income accrued meanwhile, so the exact figure is the one stored on the session
+  const paid = (await one(bridge, `SELECT reward_paid::float8 AS paid FROM public.gridshot_sessions WHERE user_id = $1 AND NOT flagged_cheat AND completed_at IS NOT NULL`, [uid])).paid;
+  ok(Math.abs(paid - expected) < 0.011 && after.balance - before.balance >= expected - 0.01, 'server paid the round reward with the weapon multiplier', `${paid} vs ${expected} (balance moved ${after.balance - before.balance})`);
   ok(/validado pelo servidor/.test(await page.textContent('#aimlab-banner-desc')) && (await page.textContent('#aimlab-banner-desc')).includes(expected.toFixed(2)), 'banner shows the reward the server paid', await page.textContent('#aimlab-banner-desc'));
   ok((await one(bridge, `SELECT kills FROM public.inventory_items WHERE uid = $1`, [gun])).kills === 15 && (await page.evaluate(() => state.inventory[0].kills)) === 15, 'SyncTrack kill counter saved on the server');
 
@@ -401,6 +416,63 @@ for (const [label, make] of [
   await page.click('#server-overlay-retry');
   await p.ready();
   ok((await page.evaluate(() => server.mode)) === 'authoritative' && (await page.evaluate(() => state.inventory.length)) === 1, 'retry reconnects and restores the server state');
+  ok(p.errors.length === 0, 'no JS errors', p.errors.join(' | '));
+  await p.ctx.close();
+}
+
+// ===========================================================================
+// F. Page behaviour fixed after the index.html review
+// ===========================================================================
+{
+  const bridge = await createBridge([NEW_SCHEMA]);
+  const p = await player(bridge);
+  const { page } = p;
+  const uid = await p.uid();
+  const opened = async () => (await one(bridge, `SELECT cases_opened FROM public.profiles WHERE id = $1`, [uid])).cases_opened;
+
+  // static facts come from the game constants
+  const facts = await page.evaluate(() => ({
+    tiers: [...document.querySelectorAll('#tier-filter-select option')].map((o) => o.textContent),
+    tierAuto: document.getElementById('tier-filter-select').getAttribute('autocomplete'),
+    odds: [...document.querySelectorAll('#odds-pills .pill')].map((o) => o.textContent),
+    badge: document.getElementById('api-status-badge').textContent,
+    pill: document.getElementById('catalog-facts-pill').textContent,
+    combo: document.getElementById('aimlab-combo-label').textContent,
+    filters: [...document.querySelectorAll('#collection-filter-group .col-filter-btn')].map((b) => b.textContent),
+    xp: document.getElementById('top-xp-text').textContent,
+    preconnect: [...document.querySelectorAll('link[rel="preconnect"]')].map((l) => l.getAttribute('href')),
+  }));
+  ok(facts.tiers.length === 7 && facts.tiers[4] === 'Tier 4 — Comandante ($2,400 – $4,200)' && facts.tiers[6] === 'Tier 6 — Lenda ($38,000 – $65,000)' && facts.tierAuto === 'off',
+    'tier filter options are built from the catalog, in the same number format as the prices', JSON.stringify(facts.tiers));
+  ok(facts.odds.join(' | ') === 'Padrão 75% | Tático 16% | Protótipo 5.5% | Relíquia 2.5% | ★ Apex Mítico 1%', 'odds pills are rendered from RARITIES', facts.odds.join(' | '));
+  ok(/18 Caixas.*252 Skins/.test(facts.badge) && /16 Silhuetas/.test(facts.pill) && /MÁX 2\.0x/.test(facts.combo) && facts.xp === '0 / 168 XP', 'counts, combo cap and XP label come from the game data', JSON.stringify([facts.badge, facts.pill, facts.combo, facts.xp]));
+  ok(facts.filters.join('/') === 'Obtidas/Faltando/Todas', 'collection filter buttons are in Portuguese', facts.filters.join('/'));
+  ok(facts.preconnect.includes(SUPA), 'the page preconnects to the same Supabase origin the adapter uses', facts.preconnect.join(','));
+
+  // reward modal: background inert, focus inside, no second opening behind it
+  ok(await p.openCase(), 'case opened');
+  const modalState = await page.evaluate(() => ({
+    focus: document.activeElement?.id,
+    shell: document.querySelector('.app-shell').inert,
+    topbar: document.querySelector('.topbar').inert,
+  }));
+  ok(modalState.focus === 'modal-keep-btn' && modalState.shell && modalState.topbar, 'with the reward modal open the page behind is inert and focus is on "Guardar"', JSON.stringify(modalState));
+  await page.evaluate(() => { document.getElementById('open-case-btn').click(); spinRoulette(); });
+  await sleep(500);
+  ok((await opened()) === 1 && !(await page.evaluate(() => isSpinning)) && (await page.evaluate(() => currentUnboxedBatch.length)) === 1, 'ABRIR cannot fire again behind the modal (nothing spent, drop not discarded)');
+  await page.keyboard.press('Enter');
+  await sleep(300);
+  ok((await page.evaluate(() => document.getElementById('reward-modal').classList.contains('hidden'))) && (await opened()) === 1 && !(await page.evaluate(() => document.querySelector('.app-shell').inert)) && (await page.textContent('#inv-count')) === '1',
+    'Enter keeps the item, closes the modal and re-enables the page — without opening another case');
+
+  // tier filter stays consistent
+  await page.selectOption('#tier-filter-select', '1');
+  await page.evaluate(() => jumpToCaseAndOpenTab('nx_t5_2'));
+  const jump = await page.evaluate(() => ({ tier: document.getElementById('tier-filter-select').value, sel: document.getElementById('all-cases-select').value, active: activeCase.id, title: document.getElementById('active-case-title').textContent, opts: document.getElementById('all-cases-select').options.length }));
+  ok(jump.tier === '5' && jump.sel === 'nx_t5_2' && jump.active === 'nx_t5_2' && jump.opts === 3, '"Ir para Caixa" on a case of another tier moves the tier filter with it', JSON.stringify(jump));
+  await p.reload();
+  const afterReload = await page.evaluate(() => ({ tier: document.getElementById('tier-filter-select').value, active: activeCase.id, opts: document.getElementById('all-cases-select').options.length, scope: document.getElementById('inv-case-select').value }));
+  ok(afterReload.tier === 'ALL' && afterReload.opts === 18 && afterReload.scope === 'ALL', 'after a reload the tier filter and the case list both start on "all"', JSON.stringify(afterReload));
   ok(p.errors.length === 0, 'no JS errors', p.errors.join(' | '));
   await p.ctx.close();
 }
