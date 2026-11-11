@@ -2720,6 +2720,13 @@ async function publishMyScoreToCloud(force = false) {
   try {
     if (window.neonBackend?.isCommercialServerEnabled) {
       const res = await window.neonBackend.syncOperatorLeaderboard(myEntry);
+      // The server answers with the official operator ID (bound to the signed-in account): adopt it
+      if (res && res.player_id && res.player_id !== state.playerId) {
+        delete lbPlayersMap[state.playerId];
+        state.playerId = res.player_id;
+        saveState();
+        saveLeaderboardCache();
+      }
       if (res && res.callsign && res.callsign !== state.callsign && !res.callsign.startsWith('Operador-')) {
         state.callsign = res.callsign;
         state.callsignLocked = true;
@@ -2733,7 +2740,10 @@ async function publishMyScoreToCloud(force = false) {
     }
     if (statusEl) {
       const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      statusEl.textContent = `🟢 Sincronizado no Supabase como "${myEntry.callsign}" (${timeStr})`;
+      const where = window.neonBackend?.isCommercialServerEnabled ? ' no Supabase' : '';
+      // Rebuilt after the sync: the server may have answered with the official ID / locked Callsign
+      const shownCallsign = buildMyLeaderboardEntry().callsign;
+      statusEl.textContent = `🟢 Sincronizado${where} como "${shownCallsign}" (${timeStr})`;
     }
   } catch (err) {
     if (String(err?.message || '').includes('CALLSIGN_TAKEN')) {
@@ -2749,6 +2759,8 @@ async function publishMyScoreToCloud(force = false) {
 }
 
 function initLeaderboardLiveStream() {
+  // With Supabase as the source of truth, the open ntfy.sh topic must not feed the board
+  if (window.neonBackend?.isCommercialServerEnabled) return;
   try {
     const es = new EventSource(`https://ntfy.sh/${LB_TOPIC}/sse`);
     es.onmessage = (evt) => {

@@ -38,12 +38,20 @@ Deno.serve(async (req: Request) => {
     return new Response(JSON.stringify({ error: 'Invalid HMAC signature' }), { status: 401 });
   }
 
-  const payload = JSON.parse(rawBody);
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    return new Response(JSON.stringify({ error: 'Invalid JSON body' }), { status: 400 });
+  }
   const { external_tx_id, user_id, product_code, amount_brl } = payload;
+  if (!external_tx_id || !user_id || !product_code) {
+    return new Response(JSON.stringify({ error: 'Missing required fields' }), { status: 400 });
+  }
 
   const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  // 1. Idempotency Guard: insert into payment_ledger (fails if external_tx_id was already processed)
+  // 1. Idempotency Guard: insert into payment_ledger (UNIQUE external_tx_id)
   const { error: ledgerErr } = await supabaseAdmin.from('payment_ledger').insert({
     external_tx_id,
     user_id,
@@ -52,15 +60,25 @@ Deno.serve(async (req: Request) => {
   });
 
   if (ledgerErr) {
-    return new Response(JSON.stringify({ status: 'already_processed' }), { status: 200 });
+    // 23505 = unique_violation: this transaction was already credited
+    if (ledgerErr.code === '23505') {
+      return new Response(JSON.stringify({ status: 'already_processed' }), { status: 200 });
+    }
+    // Anything else (unknown user, DB outage...) must NOT be acknowledged, so the provider retries
+    return new Response(JSON.stringify({ error: 'Ledger insert failed', code: ledgerErr.code }), { status: 500 });
   }
 
   // 2. Grant VIP / Battle Pass entitlement on the authoritative profile
   if (product_code === 'vip_30d') {
-    await supabaseAdmin.rpc('grant_vip_days_admin', {
+    const { error: grantErr } = await supabaseAdmin.rpc('grant_vip_days_admin', {
       p_user_id: user_id,
       p_days: 30,
     });
+    if (grantErr) {
+      // Undo the ledger row so the provider's retry can credit the purchase
+      await supabaseAdmin.from('payment_ledger').delete().eq('external_tx_id', external_tx_id);
+      return new Response(JSON.stringify({ error: 'Entitlement grant failed' }), { status: 500 });
+    }
   }
 
   return new Response(JSON.stringify({ ok: true }), {
