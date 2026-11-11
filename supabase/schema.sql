@@ -8,11 +8,13 @@ CREATE EXTENSION IF NOT EXISTS citext;
 
 -- 1. TABELA DE PERFIS DE OPERADORES (ESTADO OFICIAL NO SERVIDOR)
 CREATE TABLE IF NOT EXISTS public.profiles (
-  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  player_id TEXT UNIQUE, -- Compatível tanto com Auth UUID quanto com ID de Operador
   callsign CITEXT UNIQUE, -- CITEXT garante unicidade case-insensitive no motor do Postgres!
   callsign_locked BOOLEAN NOT NULL DEFAULT FALSE,
   is_anonymous BOOLEAN NOT NULL DEFAULT TRUE,
   balance NUMERIC(16, 2) NOT NULL DEFAULT 500.00 CHECK (balance >= 0),
+  net_worth NUMERIC(16, 2) NOT NULL DEFAULT 500.00 CHECK (net_worth >= 0),
   passive_rate_per_sec NUMERIC(14, 4) NOT NULL DEFAULT 0.1500,
   last_claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   prestige_level INT NOT NULL DEFAULT 0 CHECK (prestige_level BETWEEN 0 AND 10),
@@ -323,3 +325,107 @@ BEGIN
   );
 END;
 $$;
+
+-- E) Sincronização Segura de Perfil & Ranking Global (Plug & Play)
+CREATE OR REPLACE FUNCTION public.sync_operator_leaderboard_rpc(
+  p_player_id TEXT,
+  p_callsign TEXT,
+  p_prestige_level INT,
+  p_mil_level INT,
+  p_xp BIGINT,
+  p_net_worth NUMERIC,
+  p_passive_rate NUMERIC,
+  p_unique_skins INT,
+  p_platinum_cases INT,
+  p_best_gridshot_score INT,
+  p_best_drop_value NUMERIC,
+  p_golds_unboxed INT,
+  p_cases_opened INT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_clean_callsign TEXT := btrim(p_callsign);
+  v_existing public.profiles%ROWTYPE;
+BEGIN
+  IF p_player_id IS NULL OR char_length(p_player_id) < 4 THEN
+    RAISE EXCEPTION 'ID de operador inválido.';
+  END IF;
+
+  SELECT * INTO v_existing FROM public.profiles WHERE player_id = p_player_id FOR UPDATE;
+
+  -- Se o operador já tinha um Callsign travado, mantém o Callsign original dele!
+  IF FOUND AND v_existing.callsign_locked AND v_existing.callsign IS NOT NULL THEN
+    v_clean_callsign := v_existing.callsign;
+  ELSE
+    -- Verifica se outro operador já é dono desse Callsign (case-insensitive via CITEXT)
+    IF v_clean_callsign IS NOT NULL AND NOT (lower(v_clean_callsign) LIKE 'operador-%') THEN
+      IF EXISTS (
+        SELECT 1 FROM public.profiles
+        WHERE callsign = v_clean_callsign AND player_id <> p_player_id
+      ) THEN
+        RAISE EXCEPTION 'CALLSIGN_TAKEN: O Callsign "%" já pertence a outro operador!', v_clean_callsign;
+      END IF;
+    END IF;
+  END IF;
+
+  IF NOT FOUND THEN
+    INSERT INTO public.profiles (
+      player_id,
+      callsign,
+      callsign_locked,
+      prestige_level,
+      mil_level,
+      xp,
+      net_worth,
+      passive_rate_per_sec,
+      unique_skins_count,
+      platinum_cases_count,
+      best_gridshot_score,
+      best_drop_value,
+      golds_unboxed,
+      cases_opened,
+      updated_at
+    ) VALUES (
+      p_player_id,
+      CASE WHEN lower(v_clean_callsign) LIKE 'operador-%' THEN NULL ELSE v_clean_callsign END,
+      CASE WHEN lower(v_clean_callsign) LIKE 'operador-%' THEN FALSE ELSE TRUE END,
+      LEAST(10, GREATEST(0, p_prestige_level)),
+      LEAST(55, GREATEST(1, p_mil_level)),
+      GREATEST(0, p_xp),
+      GREATEST(0, p_net_worth),
+      GREATEST(0.15, p_passive_rate),
+      LEAST(252, GREATEST(0, p_unique_skins)),
+      LEAST(18, GREATEST(0, p_platinum_cases)),
+      LEAST(40500, GREATEST(0, p_best_gridshot_score)),
+      GREATEST(0, p_best_drop_value),
+      GREATEST(0, p_golds_unboxed),
+      GREATEST(0, p_cases_opened),
+      now()
+    );
+  ELSE
+    UPDATE public.profiles
+    SET callsign = COALESCE(v_existing.callsign, CASE WHEN lower(v_clean_callsign) LIKE 'operador-%' THEN NULL ELSE v_clean_callsign END),
+        callsign_locked = v_existing.callsign_locked OR (NOT (lower(v_clean_callsign) LIKE 'operador-%')),
+        prestige_level = LEAST(10, GREATEST(v_existing.prestige_level, p_prestige_level)),
+        mil_level = LEAST(55, GREATEST(1, p_mil_level)),
+        xp = GREATEST(0, p_xp),
+        net_worth = GREATEST(0, p_net_worth),
+        passive_rate_per_sec = GREATEST(0.15, p_passive_rate),
+        unique_skins_count = LEAST(252, GREATEST(0, p_unique_skins)),
+        platinum_cases_count = LEAST(18, GREATEST(0, p_platinum_cases)),
+        best_gridshot_score = LEAST(40500, GREATEST(v_existing.best_gridshot_score, p_best_gridshot_score)),
+        best_drop_value = GREATEST(v_existing.best_drop_value, p_best_drop_value),
+        golds_unboxed = GREATEST(v_existing.golds_unboxed, p_golds_unboxed),
+        cases_opened = GREATEST(v_existing.cases_opened, p_cases_opened),
+        updated_at = now()
+    WHERE player_id = p_player_id;
+  END IF;
+
+  RETURN jsonb_build_object('ok', true, 'callsign', v_clean_callsign);
+END;
+$$;
+

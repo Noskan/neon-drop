@@ -2615,7 +2615,7 @@ function isCallsignTakenByOther(candidateName, myPlayerId = state.playerId) {
 }
 
 function mergeLeaderboardEntry(entry) {
-  if (!entry || !entry.playerId || entry.playerId === 'test_init') return;
+  if (!entry || !entry.playerId || entry.playerId === 'test_init' || entry.playerId === 'test_op') return;
   const pid = String(entry.playerId);
   const prev = lbPlayersMap[pid];
 
@@ -2657,6 +2657,22 @@ async function fetchGlobalLeaderboard() {
   if (statusEl) statusEl.textContent = '🔄 Sincronizando placar global...';
 
   try {
+    if (window.neonBackend?.isCommercialServerEnabled) {
+      const supRows = await window.neonBackend.fetchLeaderboardProfiles();
+      if (Array.isArray(supRows)) {
+        // When Supabase is authoritative, rebuild map from official PostgreSQL rows
+        lbPlayersMap = {};
+        supRows.forEach((row) => mergeLeaderboardEntry(row));
+        saveLeaderboardCache();
+        if (statusEl) {
+          const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          statusEl.textContent = `🟢 Supabase PostgreSQL • Atualizado às ${timeStr}`;
+        }
+        renderLeaderboard();
+        return;
+      }
+    }
+
     const res = await fetch(`https://ntfy.sh/${LB_TOPIC}/json?poll=1&since=all`, {
       cache: 'no-store',
     });
@@ -2702,15 +2718,30 @@ async function publishMyScoreToCloud(force = false) {
   if (force && statusEl) statusEl.textContent = '📡 Enviando dados para o placar...';
 
   try {
-    await fetch(`https://ntfy.sh/${LB_TOPIC}`, {
-      method: 'POST',
-      body: JSON.stringify(myEntry),
-    });
+    if (window.neonBackend?.isCommercialServerEnabled) {
+      const res = await window.neonBackend.syncOperatorLeaderboard(myEntry);
+      if (res && res.callsign && res.callsign !== state.callsign && !res.callsign.startsWith('Operador-')) {
+        state.callsign = res.callsign;
+        state.callsignLocked = true;
+        saveState();
+      }
+    } else {
+      await fetch(`https://ntfy.sh/${LB_TOPIC}`, {
+        method: 'POST',
+        body: JSON.stringify(myEntry),
+      });
+    }
     if (statusEl) {
       const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      statusEl.textContent = `🟢 Sincronizado como "${myEntry.callsign}" (${timeStr})`;
+      statusEl.textContent = `🟢 Sincronizado no Supabase como "${myEntry.callsign}" (${timeStr})`;
     }
   } catch (err) {
+    if (String(err?.message || '').includes('CALLSIGN_TAKEN')) {
+      state.callsign = '';
+      state.callsignLocked = false;
+      saveState();
+      alert('⚠️ Este Callsign já está registrado no banco PostgreSQL por outro operador! Escolha outro nome.');
+    }
     if (statusEl) statusEl.textContent = '🟡 Salvo localmente';
   }
 
