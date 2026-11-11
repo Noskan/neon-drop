@@ -2020,7 +2020,6 @@ function renderInventory() {
     items.forEach((item) => {
       const isTitular = keptUids.has(item.uid);
       const lockedHeirloom = isHeirloom(item.uid);
-      const isEquipped = getEquippedWeaponItem()?.uid === item.uid;
       const mMult = caseMultMap.get(item.caseId) || 1.0;
       const itemRate = getItemPassiveRate(item, mMult);
       const card = document.createElement('div');
@@ -2039,22 +2038,14 @@ function renderInventory() {
         <div class="passive-mini-tag">${isTitular ? `+${formatMoney(itemRate)}/s` : 'Duplicada (+$0/s)'}</div>
         <div class="item-price">${formatMoney(item.price)}</div>
         <div class="item-card-actions dual">
-          <button class="btn-heirloom equip-aim-btn ${isEquipped ? 'locked' : ''}" title="Equipar esta arma/faca no Treino 2D (Aim Lab)">${isEquipped ? '🎯 Equipada' : '🎯 Equipar'}</button>
           ${
             isTitular
-              ? `<button class="btn-heirloom toggle-heirloom-btn ${lockedHeirloom ? 'locked' : ''}" title="Proteger esta skin com Token de Herança Permanente (sobrevive ao reset de Prestígio)">${lockedHeirloom ? '🔒' : '🔓'}</button>`
+              ? `<button class="btn-heirloom toggle-heirloom-btn ${lockedHeirloom ? 'locked' : ''}" title="Proteger esta skin com Token de Herança Permanente (sobrevive ao reset de Prestígio)">${lockedHeirloom ? '🔒 Protegida' : '🔓 Herança'}</button>`
               : ''
           }
           <button class="btn-danger sell-single-btn" ${lockedHeirloom ? 'disabled title="Desbloqueie a Herança antes de vender"' : ''}>Vender</button>
         </div>
       `;
-      card.querySelector('.equip-aim-btn')?.addEventListener('click', () => {
-        state.equippedUid = item.uid;
-        sfx.coin();
-        saveState();
-        renderInventory();
-        renderAimLabLoadout();
-      });
       card.querySelector('.toggle-heirloom-btn')?.addEventListener('click', () => {
         toggleHeirloomUid(item.uid);
       });
@@ -2127,7 +2118,6 @@ function renderInventory() {
       const bestInst = catItem.instances[0];
       const worstInst = catItem.instances[catItem.instances.length - 1];
       const lockedHeirloom = isHeirloom(bestInst.uid);
-      const isEquipped = getEquippedWeaponItem()?.uid === bestInst.uid;
       const mMult = caseMultMap.get(catItem.sourceCaseId) || 1.0;
       const passiveRate = getItemPassiveRate(bestInst, mMult);
       const perfectionBadges = [
@@ -2144,18 +2134,10 @@ function renderInventory() {
         <div class="passive-mini-tag">+${formatMoney(passiveRate)} /s</div>
         <div class="item-price">${formatMoney(bestInst.price)}</div>
         <div class="item-card-actions dual">
-          <button class="btn-heirloom equip-aim-btn ${isEquipped ? 'locked' : ''}" title="Equipar no Treino 2D">${isEquipped ? '🎯 Equipada' : '🎯 Equipar'}</button>
           <button class="btn-heirloom toggle-heirloom-btn ${lockedHeirloom ? 'locked' : ''}" title="Proteger como Herança Permanente">${lockedHeirloom ? '🔒' : '🔓'}</button>
-          <button class="btn-danger sell-one-col-btn" ${catItem.ownedCount === 1 && lockedHeirloom ? 'disabled' : ''}>Vender</button>
+          <button class="btn-danger sell-one-col-btn" ${catItem.ownedCount === 1 && lockedHeirloom ? 'disabled' : ''}>Vender ${catItem.ownedCount > 1 ? 'Duplicada' : 'Item'}</button>
         </div>
       `;
-      card.querySelector('.equip-aim-btn')?.addEventListener('click', () => {
-        state.equippedUid = bestInst.uid;
-        sfx.coin();
-        saveState();
-        renderInventory();
-        renderAimLabLoadout();
-      });
       card.querySelector('.toggle-heirloom-btn')?.addEventListener('click', () => {
         toggleHeirloomUid(bestInst.uid);
       });
