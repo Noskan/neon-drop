@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=20261111_5" />
+  <link rel="stylesheet" href="style.css?v=20261111_6" />
 </head>
 <body>
   <!-- Sticky Top Nav (1win Design Language) -->
@@ -370,12 +370,7 @@
               <select id="aimlab-weapon-select" class="select-input"></select>
             </div>
 
-            <div class="collection-filter-group" id="aimlab-mode-group">
-              <button class="col-filter-btn active" data-aimmode="free">🎯 Modo Livre (Farm)</button>
-              <button class="col-filter-btn" data-aimmode="gridshot">⚡ Gridshot 30s (Desafio)</button>
-            </div>
-
-            <button id="aimlab-start-gridshot-btn" class="btn-open" style="display: none;">
+            <button id="aimlab-start-gridshot-btn" class="btn-open">
               ⚡ INICIAR GRIDSHOT (30s)
             </button>
           </div>
@@ -384,12 +379,12 @@
         <!-- Live Telemetry Strip -->
         <div class="aimlab-hud-strip">
           <div class="aimlab-stat-box">
-            <span>🔥 COMBO DE PRECISÃO</span>
-            <strong id="aimlab-combo-text" style="color: var(--primary);">1.00x (0 hits)</strong>
+            <span>🔥 COMBO (MÁX 2.0x)</span>
+            <strong id="aimlab-combo-text" style="color: var(--primary);">1.00x (0 seguidos)</strong>
           </div>
           <div class="aimlab-stat-box">
-            <span>💵 RECOMPENSA POR ALVO</span>
-            <strong id="aimlab-payout-text" style="color: var(--primary);">+$1.20</strong>
+            <span>🏅 RANK &amp; RECOMPENSA DA RODADA</span>
+            <strong id="aimlab-payout-text" style="color: var(--primary);">Rank C • +$0.00</strong>
           </div>
           <div class="aimlab-stat-box">
             <span>🎯 PRECISÃO &amp; ABATES</span>
@@ -404,10 +399,10 @@
         <!-- 2D Tactical Shooting Range Arena -->
         <div class="aimlab-stage" id="aimlab-stage">
           <div class="aimlab-grid-overlay"></div>
-          <div class="aimlab-banner-overlay hidden" id="aimlab-banner-overlay" style="display: none;">
+          <div class="aimlab-banner-overlay" id="aimlab-banner-overlay" style="display: flex;">
             <h2 id="aimlab-banner-title">⚡ DESAFIO GRIDSHOT 30s</h2>
-            <p id="aimlab-banner-desc">Destrua o máximo de alvos 2D em 30 segundos! Acertos no centro (Bullseye) valem +50% $ e +150 pts.</p>
-            <button id="aimlab-banner-btn" class="btn-open" style="margin-top: 12px;">COMEÇAR AGORA</button>
+            <p id="aimlab-banner-desc">Alvos expiram em 1.35s! Alcance Rank S, A ou B em 30 segundos para receber o pagamento da rodada, XP Militar e registrar seu recorde no Ranking Global.</p>
+            <button id="aimlab-banner-btn" class="btn-open" style="margin-top: 12px;">⚡ COMEÇAR GRIDSHOT (30s)</button>
           </div>
           <div class="aimlab-targets-layer" id="aimlab-targets-layer"></div>
           <div class="aimlab-hud-gun" id="aimlab-hud-gun"></div>
@@ -450,6 +445,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=20261111_5"></script>
+  <script src="app.js?v=20261111_6"></script>
 </body>
 </html>

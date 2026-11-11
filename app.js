@@ -2870,17 +2870,16 @@ document.querySelectorAll('#lb-sort-group .col-filter-btn').forEach((btn) => {
 });
 
 // =====================================================
-// 2D TACTICAL AIM LAB ENGINE (CAMPO DE TIRO & GRIDSHOT 30s)
+// 2D TACTICAL AIM LAB ENGINE (GRIDSHOT 30s ONLY — ANTI-INFLATION)
 // =====================================================
 const AIM_RARITY_MULTS = {
-  blue: 1.25,
-  purple: 1.65,
-  pink: 2.30,
-  red: 3.40,
-  gold: 5.00,
+  blue: 1.10,
+  purple: 1.25,
+  pink: 1.45,
+  red: 1.75,
+  gold: 2.20,
 };
 
-let aimMode = 'free'; // 'free' | 'gridshot'
 let aimStreak = 0;
 let aimSessionHits = 0;
 let aimSessionShots = 0;
@@ -2888,6 +2887,8 @@ let gridshotActive = false;
 let gridshotScore = 0;
 let gridshotTimeLeft = 30;
 let gridshotTimerId = null;
+let gridshotCooldownUntil = 0;
+let gridshotCooldownIntervalId = null;
 
 function getEquippedWeaponItem() {
   if (!state.inventory.length) return null;
@@ -2895,7 +2896,6 @@ function getEquippedWeaponItem() {
     const found = state.inventory.find((i) => i.uid === state.equippedUid);
     if (found) return found;
   }
-  // Auto-equip the highest-value weapon/blade in the inventory
   const best = [...state.inventory].sort((a, b) => b.price - a.price)[0];
   if (best) {
     state.equippedUid = best.uid;
@@ -2913,8 +2913,8 @@ function getAimWeaponMultiplierInfo() {
       totalWeaponMult: 1.0,
     };
   }
-  const rarityMult = AIM_RARITY_MULTS[item.rarity] || 1.25;
-  const syncMult = item.statTrak ? 1.25 : 1.0;
+  const rarityMult = AIM_RARITY_MULTS[item.rarity] || 1.1;
+  const syncMult = item.statTrak ? 1.15 : 1.0;
   const totalWeaponMult = Number((rarityMult * syncMult).toFixed(2));
   return {
     item,
@@ -2925,16 +2925,39 @@ function getAimWeaponMultiplierInfo() {
 }
 
 function getAimComboMultiplier() {
-  return Math.min(5.0, Number((1 + Math.floor(aimStreak / 2) * 0.25).toFixed(2)));
+  return Math.min(2.0, Number((1 + Math.floor(aimStreak / 3) * 0.1).toFixed(2)));
 }
 
-function computeTargetHitPayout(isCrit = false) {
+function getGridshotRankAndReward(score = gridshotScore) {
   const { ratePerSec } = computePassiveIncome();
   const { totalWeaponMult } = getAimWeaponMultiplierInfo();
-  const comboMult = getAimComboMultiplier();
-  const critMult = isCrit ? 1.5 : 1.0;
-  const baseReward = Math.max(1.2, ratePerSec * 0.45);
-  return Number((baseReward * totalWeaponMult * comboMult * critMult).toFixed(2));
+  let rank = 'C';
+  let secondsEquiv = 0;
+  let minFloor = 0;
+
+  if (score >= 6000) {
+    rank = 'S ★';
+    secondsEquiv = 22;
+    minFloor = 35;
+  } else if (score >= 4000) {
+    rank = 'A';
+    secondsEquiv = 15;
+    minFloor = 25;
+  } else if (score >= 2000) {
+    rank = 'B';
+    secondsEquiv = 9;
+    minFloor = 15;
+  } else if (score > 0) {
+    rank = 'C';
+    secondsEquiv = 4 * (score / 2000);
+    minFloor = Number((5 * (score / 2000)).toFixed(2));
+  }
+
+  const reward =
+    score > 0
+      ? Number((Math.max(minFloor, ratePerSec * secondsEquiv) * totalWeaponMult).toFixed(2))
+      : 0;
+  return { rank, reward };
 }
 
 function renderAimLabLoadout() {
@@ -2962,14 +2985,14 @@ function renderAimLabLoadout() {
   if (hudGunEl) hudGunEl.innerHTML = svgArt;
 
   if (multBadge) {
-    multBadge.textContent = `${totalWeaponMult.toFixed(2)}x MULTIPLICADOR`;
+    multBadge.textContent = `${totalWeaponMult.toFixed(2)}x BÔNUS DE ARMA`;
   }
 
   if (item) {
     if (nameEl) nameEl.textContent = `${item.name} (${item.wearShort})`;
     if (subEl) {
       const rName = RARITIES[item.rarity]?.name || 'Padrão';
-      subEl.textContent = `Raridade ${rName} • Valor: ${formatMoney(item.price)}${item.statTrak ? ' • Bônus SyncTrack™ +25% $ ativo!' : ''}`;
+      subEl.textContent = `Raridade ${rName} • Valor: ${formatMoney(item.price)}${item.statTrak ? ' • SyncTrack™ +15% Bônus de Rodada!' : ''}`;
     }
     if (syncPill) {
       if (item.statTrak) {
@@ -2981,23 +3004,22 @@ function renderAimLabLoadout() {
     }
   } else {
     if (nameEl) nameEl.textContent = 'Carabina Tática de Treino (Padrão)';
-    if (subEl) subEl.textContent = 'Abra caixas e guarde uma skin no inventário para multiplicar seus ganhos por alvo!';
+    if (subEl) subEl.textContent = 'Abra caixas e guarde uma skin no inventário para multiplicar a recompensa do Gridshot!';
     if (syncPill) syncPill.style.display = 'none';
   }
 
-  // Populate weapon dropdown with owned weapons sorted by highest multiplier/price
   if (selectEl) {
     if (!state.inventory.length) {
       selectEl.innerHTML = `<option value="">Carabina Padrão (1.00x)</option>`;
     } else {
       const sortedInv = [...state.inventory].sort((a, b) => {
-        const mA = (AIM_RARITY_MULTS[a.rarity] || 1) * (a.statTrak ? 1.25 : 1);
-        const mB = (AIM_RARITY_MULTS[b.rarity] || 1) * (b.statTrak ? 1.25 : 1);
+        const mA = (AIM_RARITY_MULTS[a.rarity] || 1.1) * (a.statTrak ? 1.15 : 1);
+        const mB = (AIM_RARITY_MULTS[b.rarity] || 1.1) * (b.statTrak ? 1.15 : 1);
         return mB - mA || b.price - a.price;
       });
       selectEl.innerHTML = sortedInv
         .map((inv) => {
-          const wMult = ((AIM_RARITY_MULTS[inv.rarity] || 1.25) * (inv.statTrak ? 1.25 : 1)).toFixed(2);
+          const wMult = ((AIM_RARITY_MULTS[inv.rarity] || 1.1) * (inv.statTrak ? 1.15 : 1)).toFixed(2);
           return `<option value="${inv.uid}" ${inv.uid === item?.uid ? 'selected' : ''}>[${wMult}x] ${inv.name} ${inv.statTrak ? '🔥Sync™' : ''} (${formatMoney(inv.price)})</option>`;
         })
         .join('');
@@ -3019,10 +3041,11 @@ function updateAimLabHUD() {
     comboEl.textContent = `${comboMult.toFixed(2)}x (${aimStreak} seguidos)`;
   }
 
-  const normalHit = computeTargetHitPayout(false);
-  const critHit = computeTargetHitPayout(true);
+  const { rank, reward } = getGridshotRankAndReward(gridshotScore);
   if (payoutEl) {
-    payoutEl.textContent = `+${formatMoney(normalHit)} (🎯 ${formatMoney(critHit)})`;
+    payoutEl.textContent = gridshotActive
+      ? `Rank ${rank} • +${formatMoney(reward)}`
+      : `Rank S = +${formatMoney(getGridshotRankAndReward(6500).reward)}`;
   }
 
   const accPct = aimSessionShots > 0 ? Math.round((aimSessionHits / aimSessionShots) * 100) : 100;
@@ -3030,20 +3053,15 @@ function updateAimLabHUD() {
     accEl.textContent = `${accPct}% (${aimSessionHits} alvos)`;
   }
 
-  if (aimMode === 'gridshot') {
-    if (modeLabelEl) {
-      modeLabelEl.textContent = gridshotActive
-        ? `⏱️ TEMPO RESTANTE: ${gridshotTimeLeft}s`
-        : '🏆 RECORDE GRIDSHOT 30s';
-    }
-    if (scoreEl) {
-      scoreEl.textContent = gridshotActive
-        ? `${gridshotScore.toLocaleString('en-US')} pts`
-        : `${(state.stats.bestGridshotScore || 0).toLocaleString('en-US')} pts`;
-    }
-  } else {
-    if (modeLabelEl) modeLabelEl.textContent = '🏆 RECORDE GRIDSHOT 30s';
-    if (scoreEl) scoreEl.textContent = `${(state.stats.bestGridshotScore || 0).toLocaleString('en-US')} pts`;
+  if (modeLabelEl) {
+    modeLabelEl.textContent = gridshotActive
+      ? `⏱️ TEMPO RESTANTE: ${gridshotTimeLeft}s`
+      : '🏆 RECORDE GRIDSHOT 30s';
+  }
+  if (scoreEl) {
+    scoreEl.textContent = gridshotActive
+      ? `${gridshotScore.toLocaleString('en-US')} pts`
+      : `${(state.stats.bestGridshotScore || 0).toLocaleString('en-US')} pts`;
   }
 }
 
@@ -3067,6 +3085,7 @@ function spawnFloatingHitText(x, y, text, type = 'normal') {
 }
 
 function spawnSingleAimTarget() {
+  if (!gridshotActive) return;
   const layer = document.getElementById('aimlab-targets-layer');
   const stage = document.getElementById('aimlab-stage');
   if (!layer || !stage) return;
@@ -3075,11 +3094,10 @@ function spawnSingleAimTarget() {
   const width = rect.width || 800;
   const height = rect.height || 500;
 
-  const size = aimMode === 'gridshot' ? 68 : Math.floor(Math.random() * 18) + 60;
+  const size = 66;
   const padX = 70;
   const padY = 65;
 
-  // Try up to 8 positions so targets don't overlap each other
   let x = width / 2;
   let y = height / 2;
   const existing = Array.from(layer.querySelectorAll('.aimlab-target'));
@@ -3110,8 +3128,21 @@ function spawnSingleAimTarget() {
   bullseye.className = 'aimlab-bullseye';
   target.appendChild(bullseye);
 
+  // Target expires after 1.35s if not clicked, resetting combo!
+  const expireTimer = setTimeout(() => {
+    if (!target.isConnected) return;
+    target.remove();
+    if (gridshotActive) {
+      aimStreak = 0;
+      spawnFloatingHitText(x, y, '⏱️ EXPIROU (Combo 1.0x)', 'miss');
+      updateAimLabHUD();
+      ensureAimTargetsCount(3);
+    }
+  }, 1350);
+
   target.addEventListener('pointerdown', (e) => {
     e.stopPropagation();
+    clearTimeout(expireTimer);
     const isCrit = e.target === bullseye;
     handleAimTargetHit(target, x, y, isCrit);
   });
@@ -3122,7 +3153,7 @@ function spawnSingleAimTarget() {
 function ensureAimTargetsCount(count = 3) {
   const layer = document.getElementById('aimlab-targets-layer');
   if (!layer) return;
-  if (aimMode === 'gridshot' && !gridshotActive) {
+  if (!gridshotActive) {
     layer.innerHTML = '';
     return;
   }
@@ -3132,7 +3163,7 @@ function ensureAimTargetsCount(count = 3) {
 }
 
 function handleAimTargetHit(targetEl, x, y, isCrit) {
-  if (aimMode === 'gridshot' && !gridshotActive) return;
+  if (!gridshotActive) return;
 
   targetEl.remove();
   triggerHudGunRecoil();
@@ -3142,11 +3173,7 @@ function handleAimTargetHit(targetEl, x, y, isCrit) {
   aimSessionShots++;
   state.stats.targetsHit = (state.stats.targetsHit || 0) + 1;
 
-  const payout = computeTargetHitPayout(isCrit);
-  const xpGain = isCrit ? 8 : 4;
-
-  state.balance = Number((state.balance + payout).toFixed(2));
-  state.stats.totalEarned = Number((state.stats.totalEarned + payout).toFixed(2));
+  const xpGain = isCrit ? 4 : 2;
   addTacticalXP(xpGain);
 
   // Increment real SyncTrack™ kill counter on the equipped weapon!
@@ -3155,7 +3182,6 @@ function handleAimTargetHit(targetEl, x, y, isCrit) {
     equipped.kills = (equipped.kills || 0) + 1;
     const syncPill = document.getElementById('aimlab-synctrack-pill');
     if (syncPill) syncPill.textContent = `🔥 SyncTrack™: ${equipped.kills} alvos`;
-    // Update weapon SVG LED every hit so the digital display on the weapon ticks up live!
     const svgArt = getTacticalWeaponSVG(equipped);
     const thumbEl = document.getElementById('aimlab-weapon-art');
     const hudGunEl = document.getElementById('aimlab-hud-gun');
@@ -3163,24 +3189,15 @@ function handleAimTargetHit(targetEl, x, y, isCrit) {
     if (hudGunEl) hudGunEl.innerHTML = svgArt;
   }
 
-  if (aimMode === 'gridshot' && gridshotActive) {
-    const comboMult = getAimComboMultiplier();
-    const pts = Math.round((isCrit ? 150 : 100) * comboMult);
-    gridshotScore += pts;
-    spawnFloatingHitText(
-      x,
-      y,
-      `${isCrit ? '🎯 CRÍTICO! ' : ''}+${formatMoney(payout)} • +${pts} pts`,
-      isCrit ? 'crit' : 'normal'
-    );
-  } else {
-    spawnFloatingHitText(
-      x,
-      y,
-      `${isCrit ? '🎯 BULLSEYE! ' : ''}+${formatMoney(payout)} (+${xpGain} XP)`,
-      isCrit ? 'crit' : 'normal'
-    );
-  }
+  const comboMult = getAimComboMultiplier();
+  const pts = Math.round((isCrit ? 150 : 100) * comboMult);
+  gridshotScore += pts;
+  spawnFloatingHitText(
+    x,
+    y,
+    `${isCrit ? '🎯 BULLSEYE! ' : ''}+${pts} pts (+${xpGain} XP)`,
+    isCrit ? 'crit' : 'normal'
+  );
 
   sfx.targetHit(isCrit);
   updateTopBar();
@@ -3188,31 +3205,64 @@ function handleAimTargetHit(targetEl, x, y, isCrit) {
   ensureAimTargetsCount(3);
 }
 
-// Background click on stage = missed shot (resets combo streak)
+// Background click on stage = missed shot (resets combo streak & penalizes -50 pts)
 document.getElementById('aimlab-stage')?.addEventListener('pointerdown', (e) => {
   if (e.target.closest('.aimlab-banner-overlay') || e.target.closest('.aimlab-target')) return;
-  if (aimMode === 'gridshot' && !gridshotActive) return;
+  if (!gridshotActive) return;
 
   triggerHudGunRecoil();
   aimStreak = 0;
   aimSessionShots++;
-  if (aimMode === 'gridshot' && gridshotActive) {
-    gridshotScore = Math.max(0, gridshotScore - 50);
-  }
+  gridshotScore = Math.max(0, gridshotScore - 50);
   const rect = e.currentTarget.getBoundingClientRect();
-  spawnFloatingHitText(e.clientX - rect.left, e.clientY - rect.top, '✕ ERROU (Combo 1.0x)', 'miss');
+  spawnFloatingHitText(e.clientX - rect.left, e.clientY - rect.top, '✕ ERROU (-50 pts • Combo 1.0x)', 'miss');
   sfx.targetMiss();
   updateAimLabHUD();
 });
 
+function updateCooldownButtonsUI() {
+  const remSec = Math.ceil((gridshotCooldownUntil - Date.now()) / 1000);
+  const startBtn = document.getElementById('aimlab-start-gridshot-btn');
+  const bannerBtn = document.getElementById('aimlab-banner-btn');
+
+  if (remSec > 0) {
+    if (startBtn) {
+      startBtn.disabled = true;
+      startBtn.textContent = `⏳ RECARREGANDO (${remSec}s)`;
+    }
+    if (bannerBtn) {
+      bannerBtn.disabled = true;
+      bannerBtn.textContent = `⏳ RECARREGANDO ESTANDE (${remSec}s)`;
+    }
+  } else {
+    if (gridshotCooldownIntervalId) {
+      clearInterval(gridshotCooldownIntervalId);
+      gridshotCooldownIntervalId = null;
+    }
+    if (startBtn) {
+      startBtn.disabled = gridshotActive;
+      startBtn.textContent = '⚡ INICIAR GRIDSHOT (30s)';
+    }
+    if (bannerBtn) {
+      bannerBtn.disabled = false;
+      bannerBtn.textContent = '⚡ JOGAR GRIDSHOT (30s)';
+    }
+  }
+}
+
 function startGridshotChallenge() {
-  aimMode = 'gridshot';
+  if (gridshotActive) return;
+  if (Date.now() < gridshotCooldownUntil) return;
+
   gridshotActive = true;
   gridshotScore = 0;
   gridshotTimeLeft = 30;
   aimStreak = 0;
   aimSessionHits = 0;
   aimSessionShots = 0;
+
+  const startBtn = document.getElementById('aimlab-start-gridshot-btn');
+  if (startBtn) startBtn.disabled = true;
 
   const banner = document.getElementById('aimlab-banner-overlay');
   if (banner) {
@@ -3250,14 +3300,18 @@ function endGridshotChallenge() {
     state.stats.bestGridshotScore = gridshotScore;
   }
 
-  // Calculate end-of-round Rank Bonus
-  const { ratePerSec } = computePassiveIncome();
-  const { totalWeaponMult } = getAimWeaponMultiplierInfo();
-  const bonusCash = Number((Math.max(15, ratePerSec * 6) * totalWeaponMult * (gridshotScore / 2500)).toFixed(2));
-  if (bonusCash > 0) {
-    state.balance = Number((state.balance + bonusCash).toFixed(2));
-    state.stats.totalEarned = Number((state.stats.totalEarned + bonusCash).toFixed(2));
+  const { rank, reward } = getGridshotRankAndReward(gridshotScore);
+  if (reward > 0) {
+    state.balance = Number((state.balance + reward).toFixed(2));
+    state.stats.totalEarned = Number((state.stats.totalEarned + reward).toFixed(2));
+    sfx.coin();
   }
+
+  // 15-second cooldown between rounds to prevent macro farming
+  gridshotCooldownUntil = Date.now() + 15000;
+  if (gridshotCooldownIntervalId) clearInterval(gridshotCooldownIntervalId);
+  gridshotCooldownIntervalId = setInterval(updateCooldownButtonsUI, 500);
+  updateCooldownButtonsUI();
 
   saveState();
   updateTopBar();
@@ -3268,18 +3322,14 @@ function endGridshotChallenge() {
   const banner = document.getElementById('aimlab-banner-overlay');
   const titleEl = document.getElementById('aimlab-banner-title');
   const descEl = document.getElementById('aimlab-banner-desc');
-  const btnEl = document.getElementById('aimlab-banner-btn');
 
   if (titleEl) {
     titleEl.textContent = isNewRecord
-      ? `🏆 NOVO RECORDE GRIDSHOT: ${gridshotScore.toLocaleString('en-US')} PTS!`
-      : `⚡ FIM DO GRIDSHOT: ${gridshotScore.toLocaleString('en-US')} PTS`;
+      ? `🏆 NOVO RECORDE (RANK ${rank}): ${gridshotScore.toLocaleString('en-US')} PTS!`
+      : `⚡ FIM DO GRIDSHOT (RANK ${rank}): ${gridshotScore.toLocaleString('en-US')} PTS`;
   }
   if (descEl) {
-    descEl.textContent = `Alvos Abatidos: ${aimSessionHits} • Precisão: ${accPct}% • Bônus de Rodada: +${formatMoney(bonusCash)} (Sincronizado no Ranking Global!)`;
-  }
-  if (btnEl) {
-    btnEl.textContent = '⚡ JOGAR GRIDSHOT NOVAMENTE (30s)';
+    descEl.textContent = `Alvos Abatidos: ${aimSessionHits} • Precisão: ${accPct}% • Pagamento da Rodada: +${formatMoney(reward)} (Sincronizado no Ranking Global!)`;
   }
   if (banner) {
     banner.classList.remove('hidden');
@@ -3291,46 +3341,6 @@ document.getElementById('aimlab-weapon-select')?.addEventListener('change', (e) 
   state.equippedUid = e.target.value || null;
   saveState();
   renderAimLabLoadout();
-});
-
-document.querySelectorAll('#aimlab-mode-group .col-filter-btn').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('#aimlab-mode-group .col-filter-btn').forEach((b) => b.classList.remove('active'));
-    btn.classList.add('active');
-    const selectedMode = btn.getAttribute('data-aimmode') || 'free';
-    if (gridshotTimerId) {
-      clearInterval(gridshotTimerId);
-      gridshotTimerId = null;
-    }
-    gridshotActive = false;
-    aimMode = selectedMode;
-    aimStreak = 0;
-
-    const banner = document.getElementById('aimlab-banner-overlay');
-    const startBtn = document.getElementById('aimlab-start-gridshot-btn');
-    const layer = document.getElementById('aimlab-targets-layer');
-    if (layer) layer.innerHTML = '';
-
-    if (aimMode === 'gridshot') {
-      if (startBtn) startBtn.style.display = 'inline-flex';
-      if (banner) {
-        document.getElementById('aimlab-banner-title').textContent = '⚡ DESAFIO GRIDSHOT 30s';
-        document.getElementById('aimlab-banner-desc').textContent =
-          'Destrua o máximo de alvos 2D em 30 segundos! Sua pontuação vai direto para o Ranking Global.';
-        document.getElementById('aimlab-banner-btn').textContent = '⚡ COMEÇAR GRIDSHOT (30s)';
-        banner.classList.remove('hidden');
-        banner.style.display = 'flex';
-      }
-    } else {
-      if (startBtn) startBtn.style.display = 'none';
-      if (banner) {
-        banner.classList.add('hidden');
-        banner.style.display = 'none';
-      }
-      ensureAimTargetsCount(3);
-    }
-    updateAimLabHUD();
-  });
 });
 
 document.getElementById('aimlab-start-gridshot-btn')?.addEventListener('click', startGridshotChallenge);
