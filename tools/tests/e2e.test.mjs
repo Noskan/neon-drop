@@ -773,6 +773,95 @@ const seed = async (bridge, uid, where, copies = 1, extra = '') => {
   await p2.ctx.close();
 }
 
+// ===========================================================================
+// I. Saving the account with Google and getting it back on another device
+// ===========================================================================
+{
+  const bridge = await createBridge([NEW_SCHEMA]);
+  const signups = () => calls(bridge, '/auth/v1/signup').length;
+  const card = (page) => page.evaluate(() => ({
+    shown: !document.getElementById('account-section').hidden,
+    title: document.getElementById('account-status-title').textContent,
+    link: !document.getElementById('account-link-btn').hidden,
+    signin: !document.getElementById('account-signin-btn').hidden,
+    signout: !document.getElementById('account-signout-btn').hidden,
+  }));
+  // a click that leaves for "Google" and comes back to the game
+  const roundTrip = async (p, selector) => {
+    await p.tab('stats');
+    const back = p.page.waitForEvent('framenavigated', { predicate: (f) => f === p.page.mainFrame() && f.url().startsWith(ORIGIN) && /[?&](code|error)=/.test(f.url()), timeout: 15000 });
+    await p.page.click(selector);
+    await back;
+    await until(() => p.page.evaluate(() => typeof server !== 'undefined' && server.mode === 'authoritative' && !server.busy && window.neonBackend.oauthResult === null && !localStorage.getItem('neondrop_sb_oauth_v1')).catch(() => false), 15000);
+  };
+
+  // device 1: plays anonymously, then saves the account
+  const a = await player(bridge);
+  const uidA = await a.uid();
+  ok(await a.openCase(), 'device 1: plays as an anonymous account');
+  await a.page.click('#modal-keep-btn');
+  await a.tab('stats');
+  const before = await card(a.page);
+  ok(before.shown && /não salva/.test(before.title) && before.link && before.signin && !before.signout, 'the account card says the progress is not saved and offers Google', JSON.stringify(before));
+
+  bridge.oauth.manualLinking = false;
+  await a.page.click('#account-link-btn');
+  const off = await until(() => a.toast());
+  ok(/desligado no servidor/.test(off || '') && new URL(a.page.url()).origin === ORIGIN && !(await a.page.isDisabled('#account-link-btn')), 'linking switched off on the server: a notice, the page stays where it is', off || '');
+  bridge.oauth.manualLinking = true;
+
+  bridge.oauth.googleAccount = null;
+  await roundTrip(a, '#account-link-btn');
+  const cancelled = await until(() => a.toast());
+  ok(/cancelado/.test(cancelled || '') && (await a.uid()) === uidA && /não salva/.test((await card(a.page)).title) && !/error|code/.test(a.page.url()), 'cancelling at Google comes back to the same unsaved account with a clean address', `${cancelled} ${a.page.url()}`);
+
+  bridge.oauth.googleAccount = 'ana@example.com';
+  await roundTrip(a, '#account-link-btn');
+  const saved = await card(a.page);
+  const savedToast = await until(() => a.toast());
+  ok((await a.uid()) === uidA && (await a.page.evaluate(() => state.inventory.length)) === 1 && signups() === 1, 'saving with Google keeps the same account and its inventory');
+  ok(/Conta salva: ana@example\.com/.test(saved.title) && !saved.link && !saved.signin && saved.signout && /Conta salva com Google/.test(savedToast || ''), 'the card and a notice confirm the account is saved', JSON.stringify(saved));
+  ok(a.page.url() === ORIGIN + '/index.html' && (await a.page.evaluate(() => localStorage.getItem('neondrop_sb_oauth_v1'))) === null, 'the login code is removed from the address bar and the verifier from storage', a.page.url());
+  await a.reload();
+  ok((await a.uid()) === uidA && /Conta salva/.test((await card(a.page)).title), 'still saved after a reload');
+
+  // device 2: another browser with its own unsaved progress signs in to the saved account
+  const b = await player(bridge);
+  const uidB = await b.uid();
+  ok(await b.openCase(), 'device 2: has its own anonymous progress');
+  await b.page.click('#modal-keep-btn');
+  await roundTrip(b, '#account-signin-btn');
+  ok(b.dialogs.some((d) => /NÃO está salvo/.test(d)), 'signing in over unsaved progress asks first');
+  const invA = await a.page.evaluate(() => state.inventory.map((i) => i.uid).sort().join());
+  ok(uidB !== uidA && (await b.uid()) === uidA && (await b.page.evaluate(() => state.inventory.map((i) => i.uid).sort().join())) === invA && /entrou na sua conta salva/.test((await until(() => b.toast())) || ''),
+    'device 2 now plays the saved account: same ID, same inventory');
+  ok(signups() === 2 && (await one(bridge, `SELECT count(*)::int n FROM public.profiles`)).n === 2, 'no extra account was created by the sign-in');
+
+  // device 3: tries to SAVE with a Google account that already holds another progress
+  const c = await player(bridge);
+  const uidC = await c.uid();
+  await roundTrip(c, '#account-link-btn');
+  await until(() => c.page.evaluate((u) => typeof server !== 'undefined' && server.mode === 'authoritative' && !server.busy && state.playerId === u, uidA).catch(() => false), 15000);
+  ok(c.dialogs.some((d) => /já está ligada a outro progresso/.test(d)) && uidC !== uidA && (await c.uid()) === uidA, 'a Google account already in use is not linked twice: the player is offered to sign in to it instead', c.dialogs.join(' | '));
+
+  // sign out on device 2: back to a fresh unsaved account, the saved one untouched
+  await b.tab('stats');
+  await b.page.click('#account-signout-btn');
+  await until(() => b.page.evaluate((u) => typeof server !== 'undefined' && server.mode === 'authoritative' && !server.busy && state.playerId !== u, uidA).catch(() => false), 15000);
+  const out = await card(b.page);
+  ok((await b.uid()) !== uidA && /não salva/.test(out.title) && (await b.page.evaluate(() => state.inventory.length)) === 0 && (await one(bridge, `SELECT count(*)::int n FROM public.inventory_items WHERE user_id = $1`, [uidA])).n === 1,
+    'signing out leaves a new unsaved account here and the saved progress intact on the server', JSON.stringify(out));
+
+  // a Google account never used before: signing in creates its own saved account
+  bridge.oauth.googleAccount = 'bia@example.com';
+  await roundTrip(b, '#account-signin-btn');
+  const bia = await card(b.page);
+  ok(/Conta salva: bia@example\.com/.test(bia.title) && (await b.uid()) !== uidA, 'a Google account with no progress yet gets its own saved account', JSON.stringify(bia));
+
+  for (const [name, p] of [['device 1', a], ['device 2', b], ['device 3', c]]) ok(p.errors.length === 0, `${name}: no JS errors`, p.errors.join(' | '));
+  await a.ctx.close(); await b.ctx.close(); await c.ctx.close();
+}
+
 await browser.close();
 stat.close();
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL PASSED');

@@ -4151,6 +4151,97 @@ function maybeResyncOnReturn() {
 document.addEventListener('visibilitychange', maybeResyncOnReturn);
 window.addEventListener('online', () => resyncServerState());
 
+// ---------- Conta salva (Google) ----------
+function renderAccountCard() {
+  const section = document.getElementById('account-section');
+  if (!section) return;
+  section.hidden = !isServerMode();
+  if (!isServerMode()) return;
+  const info = window.neonBackend.getAccountInfo();
+  const saved = info.signedIn && !info.isAnonymous;
+  document.getElementById('account-status-title').textContent = saved
+    ? `✅ Conta salva${info.email ? ': ' + info.email : ''}`
+    : '⚠️ Conta não salva';
+  document.getElementById('account-status-desc').textContent = saved
+    ? 'Seu progresso está ligado a essa conta Google. Em outro aparelho ou navegador, use "Entrar com Google" para continuar de onde parou.'
+    : 'Seu progresso existe só neste navegador: se os dados do site forem apagados, ele se perde. Salve a conta com Google para poder recuperá-lo em qualquer aparelho.';
+  document.getElementById('account-link-btn').hidden = saved;
+  document.getElementById('account-signin-btn').hidden = saved;
+  document.getElementById('account-signout-btn').hidden = !saved;
+}
+
+function describeAccountError(code, message = '') {
+  if (code === 'NETWORK') return '📡 Sem resposta do servidor. Confira a conexão e tente de novo.';
+  if (code === 'access_denied') return 'Login com Google cancelado.';
+  if (code === 'manual_linking_disabled') return '⚠️ Salvar conta está desligado no servidor no momento.';
+  if (code === 'STORAGE_UNAVAILABLE') return '⚠️ O navegador bloqueou o armazenamento do site; sem ele não dá para fazer o login.';
+  if (code === 'AUTH_UNAVAILABLE') return '🔐 Sua conta de jogo está indisponível agora. Tente em alguns minutos.';
+  return `⚠️ Não foi possível concluir o login com Google${message ? ' (' + message + ')' : ''}. Tente de novo.`;
+}
+
+async function startAccountFlow(mode) {
+  if (!isServerMode() || isSpinning || gridshotActive || server.busy) return;
+  if (mode === 'signin') {
+    const info = window.neonBackend.getAccountInfo();
+    const hasProgress = state.inventory.length > 0 || (state.stats.casesOpened || 0) > 0;
+    if (info.isAnonymous && hasProgress) {
+      const go = confirm(
+        'Entrar numa conta salva troca a conta deste navegador.\n\nO progresso atual daqui NÃO está salvo e deixa de ficar acessível. Para guardar este progresso, cancele e use "Salvar conta com Google".\n\nEntrar mesmo assim?'
+      );
+      if (!go) return;
+    }
+  }
+  const buttons = ['account-link-btn', 'account-signin-btn'].map((id) => document.getElementById(id));
+  buttons.forEach((b) => (b.disabled = true));
+  try {
+    await window.neonBackend.startOAuth(mode);
+  } catch (err) {
+    buttons.forEach((b) => (b.disabled = false));
+    showToast(describeAccountError(err?.code, err?.message), 'error');
+  }
+}
+
+// Mostra, uma vez, o que aconteceu na volta do Google
+function reportAccountRedirect() {
+  const result = window.neonBackend.oauthResult;
+  if (!result) return;
+  window.neonBackend.oauthResult = null;
+  if (result.ok) {
+    const who = result.email ? ` (${result.email})` : '';
+    showToast(
+      result.mode === 'link'
+        ? `✅ Conta salva com Google${who}. Seu progresso agora pode ser recuperado em qualquer aparelho.`
+        : `✅ Você entrou na sua conta salva${who}.`,
+      'success'
+    );
+    return;
+  }
+  const alreadyLinked = result.code === 'identity_already_exists' || /already linked/i.test(result.message || '');
+  if (result.mode === 'link' && alreadyLinked) {
+    const go = confirm(
+      'Essa conta Google já está ligada a outro progresso do NEON DROP.\n\nQuer entrar nela? Este navegador passa a usar essa conta, e o progresso não salvo daqui deixa de ficar acessível.'
+    );
+    if (go) window.neonBackend.startOAuth('signin').catch((err) => showToast(describeAccountError(err?.code, err?.message), 'error'));
+    return;
+  }
+  showToast(describeAccountError(result.code, result.message), 'error');
+}
+
+document.getElementById('account-link-btn')?.addEventListener('click', () => startAccountFlow('link'));
+document.getElementById('account-signin-btn')?.addEventListener('click', () => startAccountFlow('signin'));
+document.getElementById('account-signout-btn')?.addEventListener('click', async () => {
+  if (isSpinning || gridshotActive || server.busy) return;
+  const go = confirm(
+    'Sair da conta neste navegador?\n\nSeu progresso continua guardado na conta Google. Este navegador volta a ter uma conta nova, não salva.'
+  );
+  if (!go) return;
+  await window.neonBackend.signOut();
+  window.location.reload();
+});
+
+// Outra aba entrou ou saiu de uma conta: o que esta aba mostra já não é da conta em uso
+if (window.neonBackend) window.neonBackend.onAccountSwitched = () => window.location.reload();
+
 // ---------- Callsign ----------
 async function registerCallsignOnServer() {
   const statusEl = document.getElementById('lb-sync-status');
@@ -4325,7 +4416,9 @@ function enterAuthoritativeMode(st) {
   applyServerInventory(st.inventory);
   applyServerProfile(st.profile, { silent: true });
   refreshAllViews();
+  renderAccountCard();
   hideServerOverlay();
+  reportAccountRedirect();
 
   const offline = st.offline;
   if (offline && Number(offline.elapsed_sec) >= 60 && Number(offline.earned) > 0 && state.inventory.length > 0) {

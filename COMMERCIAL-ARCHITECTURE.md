@@ -117,7 +117,7 @@ O cliente (`app.js`) funciona em dois modos. Se `get_my_state_rpc` responde, o s
 - **Contrato de Troca:** o item forjado sai da caixa de um dos 5 itens usados (sorteada entre eles), não da "caixa ativa" na tela. Do contrário, 5 itens baratos virariam um item da caixa mais cara.
 - **Cooldown do Gridshot:** 12s no servidor e 15s no cliente, para a latência não transformar um clique legítimo em erro.
 - **Teto de pontuação:** `score <= ((hits - crits) * 100 + crits * 150) * 2.0`, com `crits` enviado pelo cliente e limitado a `hits`. É mais apertado que `hits * 150 * 2.0`.
-- **`linkIdentity` não é exigido para registrar o Callsign:** o Callsign fica preso à conta anônima. O vínculo com Discord/Google/E-mail ainda não existe (ver pendências).
+- **`linkIdentity` não é exigido para registrar o Callsign:** o Callsign fica preso à conta do jogador, anônima ou salva. O vínculo com Google existe (aba Estatísticas → "Sua Conta"); Discord e e-mail não.
 - **Importação do save antigo:** por 7 dias a partir da primeira execução do schema, uma conta de servidor zerada pode importar uma única vez o save do `localStorage`. Preços são recalculados pelo catálogo do servidor e os números são limitados (saldo até $1 bilhão, Prestígio até X), mas o conteúdo do save é confiado. Para fechar a janela antes:
   `UPDATE public.app_settings SET value = now()::text WHERE key = 'legacy_import_until';`
 
@@ -130,7 +130,7 @@ O cliente (`app.js`) funciona em dois modos. Se `get_my_state_rpc` responde, o s
 
 1. **Ativar no Supabase:** ligar "Allow anonymous sign-ins" e executar `supabase/schema.sql` no SQL Editor.
 2. **Pagamentos:** escolher o gateway (Stripe, Mercado Pago ou AbacatePay), criar a Edge Function de checkout e publicar o webhook com as chaves do gateway.
-3. **Upgrade de conta (`linkIdentity`):** configurar os provedores OAuth no painel e criar a tela de vínculo. Até lá, limpar os dados do navegador perde o acesso à conta anônima.
+3. **Upgrade de conta (`linkIdentity`):** Google implementado (salvar a conta anônima, entrar em outro aparelho, sair), via REST com PKCE. Falta validar no site publicado com uma conta Google real; Discord e e-mail (exige SMTP próprio) seguem pendentes.
 4. **Passe de Batalha e cosméticos (§1):** falta o desenho do conteúdo (trilhas, recompensas, preços).
 5. **Validação jurídica do §1** com um advogado antes de cobrar.
 6. **Proteção contra abuso de cadastro anônimo:** ligar CAPTCHA/limites no Auth do Supabase antes de divulgar o jogo.

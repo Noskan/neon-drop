@@ -4,6 +4,8 @@
 // Para ativar o banco PostgreSQL do Supabase:
 // 1. Crie um projeto gratuito em https://supabase.com
 // 2. Ligue Authentication → Sign In / Providers → "Allow anonymous sign-ins"
+//    Para "Salvar conta com Google": ligue o provedor Google e "Allow manual linking" na mesma tela,
+//    e ponha o endereço do jogo em Authentication → URL Configuration (Site URL / Redirect URLs)
 // 3. Rode o arquivo `supabase/schema.sql` no SQL Editor do Supabase
 // 4. Cole sua Project URL e Publishable/Anon Key abaixo:
 //
@@ -17,6 +19,8 @@ window.NEON_DROP_BACKEND_CONFIG = {
 
 const NEON_DROP_SESSION_KEY = 'neondrop_sb_session_v1';
 const NEON_DROP_AUTH_LOCK = 'neondrop_sb_auth_lock';
+// Login com Google em andamento (verificador PKCE), guardado enquanto a página vai ao Google e volta
+const NEON_DROP_OAUTH_KEY = 'neondrop_sb_oauth_v1';
 // Respostas do Auth que dizem, sem ambiguidade, que a sessão guardada não existe mais
 const NEON_DROP_SESSION_GONE_CODES = new Set([
   'refresh_token_not_found',
@@ -42,6 +46,20 @@ class NeonDropCommercialAdapter {
     this.rejectedAccessToken = null;
     // Prazo base de uma requisição; chamadas com corpo grande usam um múltiplo dele
     this.requestTimeoutMs = 15000;
+    // Resultado da volta do Google ({ mode, ok, code, message, userChanged, email }), lido uma vez pelo jogo
+    this.oauthResult = null;
+    // Chamado quando OUTRA aba troca a conta deste navegador (login, logout)
+    this.onAccountSwitched = null;
+    // A página pode ter acabado de voltar do Google: a sessão só vale depois de concluir essa troca
+    this.oauthReady = this.isCommercialServerEnabled ? this.completeOAuthRedirect().catch(() => null) : Promise.resolve(null);
+    if (typeof window !== 'undefined') {
+      window.addEventListener('storage', (e) => {
+        if (e.key !== NEON_DROP_SESSION_KEY || !this.session) return;
+        const next = this.loadSession();
+        if (next?.user_id === this.session.user_id) return;
+        if (this.onAccountSwitched) this.onAccountSwitched();
+      });
+    }
   }
 
   makeError(code, message, status = 0) {
@@ -93,10 +111,14 @@ class NeonDropCommercialAdapter {
 
   storeSession(data) {
     const lifetimeMs = Math.max(10, Number(data.expires_in) || 3600) * 1000;
+    const user = data.user || null;
     this.session = {
       access_token: data.access_token,
       refresh_token: data.refresh_token,
-      user_id: data.user?.id || this.session?.user_id || null,
+      user_id: user?.id || this.session?.user_id || null,
+      // Conta anônima (só existe neste navegador) ou salva com um login
+      is_anonymous: user ? Boolean(user.is_anonymous) : this.session?.is_anonymous ?? true,
+      email: user ? user.email || null : this.session?.email ?? null,
       // Validade medida no relógio local, para não depender do relógio do jogador estar certo
       expires_at_ms: Date.now() + lifetimeMs,
       lifetime_ms: lifetimeMs,
@@ -153,9 +175,163 @@ class NeonDropCommercialAdapter {
     return /refresh token/i.test(String(d.msg || d.message || d.error_description || ''));
   }
 
+  // --------------------------------------------------------------------------
+  // CONTA SALVA (LOGIN COM GOOGLE)
+  // "Salvar conta" liga uma identidade Google à conta anônima deste navegador (o ID da conta e
+  // o progresso continuam os mesmos). "Entrar" troca a sessão deste navegador pela conta que já
+  // tem essa identidade. Fluxo PKCE: a página volta do Google com `?code=`, trocado aqui por uma
+  // sessão usando o verificador guardado antes de sair.
+  // --------------------------------------------------------------------------
+  decodeJwtClaims(token) {
+    try {
+      const part = String(token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      return JSON.parse(decodeURIComponent(escape(atob(part))));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  getAccountInfo() {
+    const s = this.session;
+    if (!s) return { signedIn: false, isAnonymous: true, email: null };
+    let isAnonymous = s.is_anonymous;
+    let email = s.email;
+    if (typeof isAnonymous !== 'boolean') {
+      // Sessão guardada antes desta versão: os dados estão no próprio token
+      const claims = this.decodeJwtClaims(s.access_token);
+      isAnonymous = claims ? claims.is_anonymous !== false : true;
+      email = claims?.email || null;
+    }
+    return { signedIn: true, isAnonymous, email: email || null };
+  }
+
+  async createPkcePair() {
+    const bytes = crypto.getRandomValues(new Uint8Array(48));
+    const verifier = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    const challenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+    return { verifier, challenge };
+  }
+
+  // mode: 'link' (salvar a conta deste navegador) ou 'signin' (entrar numa conta já salva).
+  // Em caso de sucesso a página navega para o Google e esta promessa não chega a ser usada.
+  async startOAuth(mode, provider = 'google') {
+    if (!this.isCommercialServerEnabled) throw this.makeError('AUTH_UNAVAILABLE', 'Servidor não configurado');
+    const session = mode === 'link' ? await this.ensureSession() : this.session;
+    if (mode === 'link' && !session) {
+      throw this.makeError(this.lastAuthFailure === 'network' ? 'NETWORK' : 'AUTH_UNAVAILABLE', 'Conta de jogo indisponível');
+    }
+    const { verifier, challenge } = await this.createPkcePair();
+    const params = new URLSearchParams({
+      provider,
+      redirect_to: window.location.origin + window.location.pathname,
+      code_challenge: challenge,
+      code_challenge_method: 's256',
+    });
+    try {
+      localStorage.setItem(
+        NEON_DROP_OAUTH_KEY,
+        JSON.stringify({ verifier, mode, startedAt: Date.now(), userId: this.session?.user_id || null })
+      );
+    } catch (e) {
+      // Sem storage o verificador não sobrevive à ida ao Google
+      throw this.makeError('STORAGE_UNAVAILABLE', 'Armazenamento do navegador indisponível');
+    }
+
+    if (mode !== 'link') {
+      window.location.assign(`${this.url}/auth/v1/authorize?${params}`);
+      return;
+    }
+
+    // Vincular exige a sessão atual: o Auth devolve o endereço do Google em JSON
+    params.set('skip_http_redirect', 'true');
+    let res;
+    try {
+      res = await this.request(`${this.url}/auth/v1/user/identities/authorize?${params}`, {
+        method: 'GET',
+        headers: { apikey: this.anonKey, Authorization: `Bearer ${session.access_token}` },
+      });
+    } catch (e) {
+      res = null;
+    }
+    if (!res || !res.ok || !res.data?.url) {
+      try {
+        localStorage.removeItem(NEON_DROP_OAUTH_KEY);
+      } catch (e) {
+        // ignore
+      }
+      if (!res) throw this.makeError('NETWORK', 'Sem conexão com o servidor (login)');
+      const d = res.data && typeof res.data === 'object' ? res.data : {};
+      const code = [d.error_code, d.code, d.error].find((c) => typeof c === 'string') || 'OAUTH_FAILED';
+      throw this.makeError(code, String(d.msg || d.message || d.error_description || ''), res.status);
+    }
+    window.location.assign(res.data.url);
+  }
+
+  // Roda uma vez ao carregar a página: se ela está voltando do Google, conclui o login.
+  async completeOAuthRedirect() {
+    if (typeof window === 'undefined') return null;
+    const query = new URLSearchParams(window.location.search);
+    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    const param = (k) => query.get(k) || hash.get(k);
+    const code = query.get('code');
+    const errorCode = param('error_code') || param('error');
+    if (!code && !errorCode) return null;
+
+    let pending = null;
+    try {
+      pending = JSON.parse(localStorage.getItem(NEON_DROP_OAUTH_KEY) || 'null');
+      localStorage.removeItem(NEON_DROP_OAUTH_KEY);
+    } catch (e) {
+      pending = null;
+    }
+    if (!pending?.verifier) return null; // parâmetros que não são de um login iniciado aqui
+
+    const description = param('error_description') || '';
+    // O código e o erro saem da barra de endereço (e do histórico) antes de qualquer outra coisa
+    window.history.replaceState(null, '', window.location.pathname);
+
+    const result = { mode: pending.mode, ok: false, code: null, message: '', userChanged: false, email: null };
+    this.oauthResult = result;
+    if (!code) {
+      result.code = errorCode;
+      result.message = description;
+      return result;
+    }
+    const res = await this.authRequest('token?grant_type=pkce', { auth_code: code, code_verifier: pending.verifier });
+    if (res.ok && res.data.access_token) {
+      const before = this.session?.user_id || pending.userId || null;
+      this.storeSession(res.data);
+      this.lastAuthFailure = null;
+      result.ok = true;
+      result.userChanged = Boolean(before && this.session.user_id !== before);
+      result.email = this.session.email;
+    } else {
+      const d = res.data || {};
+      result.code = res.status === 0 ? 'NETWORK' : [d.error_code, d.code, d.error].find((c) => typeof c === 'string') || 'OAUTH_FAILED';
+      result.message = String(d.msg || d.message || d.error_description || '');
+    }
+    return result;
+  }
+
+  // Encerra a sessão só neste navegador. A conta salva continua existindo no servidor.
+  async signOut() {
+    if (this.hasFreshSession()) {
+      await this.request(`${this.url}/auth/v1/logout?scope=local`, {
+        method: 'POST',
+        headers: { apikey: this.anonKey, Authorization: `Bearer ${this.session.access_token}` },
+      }).catch(() => null);
+    }
+    this.clearSession();
+  }
+
   // Devolve a sessão válida (renovando ou criando a conta anônima) ou null se o Auth não estiver disponível.
   async ensureSession() {
     if (!this.isCommercialServerEnabled) return null;
+    await this.oauthReady;
     if (this.hasFreshSession()) return this.session;
     if (!this.sessionPromise) {
       // navigator.locks serializa a renovação entre abas: o refresh token é de uso único

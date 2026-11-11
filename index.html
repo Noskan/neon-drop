@@ -9,7 +9,7 @@
   <!-- Servidor do jogo: mesma origem de SUPABASE_URL em backend-adapter.js -->
   <link rel="preconnect" href="https://mywlmdlrfewpmehqaghf.supabase.co" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=20261111_15" />
+  <link rel="stylesheet" href="style.css?v=20261111_16" />
 </head>
 <body>
   <!-- Sticky Top Nav (1win Design Language) -->
@@ -274,6 +274,20 @@
 
         <h2 class="mt-title">📊 Estatísticas da Conta</h2>
         <div class="stats-grid" id="stats-grid"></div>
+        <div id="account-section" hidden>
+          <h2 class="mt-title">🔐 Sua Conta</h2>
+          <div class="account-card">
+            <div class="account-status">
+              <strong id="account-status-title"></strong>
+              <p id="account-status-desc"></p>
+            </div>
+            <div class="account-actions">
+              <button id="account-link-btn" class="btn-open">💾 Salvar conta com Google</button>
+              <button id="account-signin-btn" class="btn-tertiary">Já tenho conta salva — Entrar com Google</button>
+              <button id="account-signout-btn" class="btn-tertiary" hidden>Sair deste navegador</button>
+            </div>
+          </div>
+        </div>
         <div class="reset-zone">
           <button id="reset-save-btn" class="btn-danger">Resetar Progresso Salvo</button>
         </div>
@@ -437,7 +451,7 @@
     </div>
   </div>
 
-  <script src="backend-adapter.js?v=20261111_15"></script>
-  <script src="app.js?v=20261111_15"></script>
+  <script src="backend-adapter.js?v=20261111_16"></script>
+  <script src="app.js?v=20261111_16"></script>
 </body>
 </html>

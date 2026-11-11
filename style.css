@@ -2037,3 +2037,45 @@ body.server-busy button {
     padding: 16px 12px 48px;
   }
 }
+
+/* Conta do jogador (aba Estatísticas): salvar / entrar com Google */
+#account-section[hidden],
+.account-card [hidden] {
+  display: none;
+}
+
+.account-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px;
+  margin-bottom: 24px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-xl);
+}
+
+.account-status {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.account-status strong {
+  display: block;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.account-status p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

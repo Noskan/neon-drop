@@ -4,6 +4,7 @@
 import { PGlite } from '@electric-sql/pglite';
 import { citext } from '@electric-sql/pglite/contrib/citext';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
+import { createHash } from 'node:crypto';
 
 // `schemaSqls`: SQL texts applied in order (e.g. an older schema, then supabase/schema.sql)
 export async function createBridge(schemaSqls) {
@@ -29,6 +30,9 @@ export async function createBridge(schemaSqls) {
     down: false, // true = every request fails at the network level
     hang: false, // true = requests are accepted and never answered
     expiresIn: 3600, // access token lifetime the fake Auth announces
+    // Fake "Sign in with Google": the consent page answers at once as `googleAccount`
+    // (null = the person cancels at Google)
+    oauth: { manualLinking: true, googleAccount: null, flows: new Map(), codes: new Map(), identities: new Map(), emails: new Map() },
     failWith: null, // (method, url) => { status, body } to answer instead of the database
     log: [],
     tokens: new Map(), // access token -> user id
@@ -63,7 +67,39 @@ export async function createBridge(schemaSqls) {
     const n = ++bridge.seq;
     bridge.tokens.set(`tok${n}`, uid);
     bridge.refresh.set(`ref${n}`, uid);
-    return { access_token: `tok${n}`, refresh_token: `ref${n}`, expires_in: bridge.expiresIn, user: { id: uid } };
+    const email = bridge.oauth.emails.get(uid) || null;
+    return { access_token: `tok${n}`, refresh_token: `ref${n}`, expires_in: bridge.expiresIn, user: { id: uid, email, is_anonymous: !email } };
+  };
+  // What the provider's consent page ends in: a redirect back to the game with a code or an error
+  const consent = async (flow) => {
+    const back = new URL(flow.redirectTo);
+    const fail = (error, code, description) => {
+      back.searchParams.set('error', error);
+      if (code) back.searchParams.set('error_code', code);
+      back.searchParams.set('error_description', description);
+      return { status: 302, location: back.toString() };
+    };
+    const email = bridge.oauth.googleAccount;
+    if (!email) return fail('access_denied', null, 'The user denied the request');
+    const owner = bridge.oauth.identities.get(email) || null;
+    let target = owner;
+    if (flow.mode === 'link') {
+      if (owner && owner !== flow.uid) return fail('server_error', 'identity_already_exists', 'Identity is already linked to another user');
+      target = flow.uid;
+    } else if (!owner) {
+      target = (await db.query(`INSERT INTO auth.users DEFAULT VALUES RETURNING id`)).rows[0].id;
+    }
+    bridge.oauth.identities.set(email, target);
+    bridge.oauth.emails.set(target, email);
+    const code = `code${++bridge.seq}`;
+    bridge.oauth.codes.set(code, { uid: target, challenge: flow.challenge });
+    back.searchParams.set('code', code);
+    return { status: 302, location: back.toString() };
+  };
+  const startFlow = (mode, uid, url) => {
+    const id = `flow${++bridge.seq}`;
+    bridge.oauth.flows.set(id, { mode, uid, challenge: url.searchParams.get('code_challenge'), redirectTo: url.searchParams.get('redirect_to') });
+    return `${url.origin}/auth/v1/fake-consent?flow=${id}`;
   };
 
   // Returns { status, body }
@@ -76,6 +112,35 @@ export async function createBridge(schemaSqls) {
       if (!bridge.anonEnabled) return { status: 422, body: { error_code: 'anonymous_provider_disabled', msg: 'Anonymous sign-ins are disabled' } };
       const id = (await db.query(`INSERT INTO auth.users DEFAULT VALUES RETURNING id`)).rows[0].id;
       return { status: 200, body: issue(id) };
+    }
+    if (url.pathname === '/auth/v1/token' && url.searchParams.get('grant_type') === 'pkce') {
+      const grant = bridge.oauth.codes.get(body.auth_code);
+      bridge.oauth.codes.delete(body.auth_code);
+      const challenge = createHash('sha256').update(String(body.code_verifier || '')).digest('base64url');
+      if (!grant) return { status: 404, body: { code: 404, error_code: 'flow_state_not_found', msg: 'invalid flow state, no valid flow state found' } };
+      if (grant.challenge !== challenge) return { status: 400, body: { code: 400, error_code: 'bad_code_verifier', msg: 'code challenge does not match previously saved code verifier' } };
+      return { status: 200, body: issue(grant.uid) };
+    }
+    if (url.pathname === '/auth/v1/authorize') {
+      if (url.searchParams.get('provider') !== 'google') return { status: 400, body: { error_code: 'validation_failed', msg: 'Unsupported provider' } };
+      // Answered in one hop: a redirect to another URL on this host would not be intercepted again
+      return consent({ mode: 'signin', uid: null, challenge: url.searchParams.get('code_challenge'), redirectTo: url.searchParams.get('redirect_to') });
+    }
+    if (url.pathname === '/auth/v1/user/identities/authorize') {
+      if (!uid) return { status: 401, body: { code: 401, error_code: 'no_authorization', msg: 'This endpoint requires a Bearer token' } };
+      if (!bridge.oauth.manualLinking) return { status: 404, body: { code: 404, error_code: 'manual_linking_disabled', msg: 'Manual linking is disabled' } };
+      return { status: 200, body: { url: startFlow('link', uid, url) } };
+    }
+    if (url.pathname === '/auth/v1/fake-consent') {
+      const flow = bridge.oauth.flows.get(url.searchParams.get('flow'));
+      if (!flow) return { status: 400, body: { msg: 'unknown flow' } };
+      bridge.oauth.flows.delete(url.searchParams.get('flow'));
+      return consent(flow);
+    }
+    if (url.pathname === '/auth/v1/logout') {
+      if (auth) bridge.tokens.delete(auth.replace('Bearer ', ''));
+      for (const [ref, owner] of bridge.refresh) if (owner === uid) bridge.refresh.delete(ref);
+      return { status: 204, body: null };
     }
     if (url.pathname === '/auth/v1/token') {
       const owner = bridge.refresh.get(body.refresh_token);
@@ -152,6 +217,8 @@ export async function createBridge(schemaSqls) {
       const forced = bridge.failWith ? bridge.failWith(req.method(), url) : null;
       if (forced) return route.fulfill({ status: forced.status, headers: { ...cors, 'content-type': 'application/json' }, body: JSON.stringify(forced.body || {}) });
       const out = await bridge.handle(req.method(), url, req.headers(), body);
+      if (out.location) return route.fulfill({ status: out.status, headers: { ...cors, location: out.location } });
+      if (out.body === null) return route.fulfill({ status: out.status, headers: cors });
       return route.fulfill({ status: out.status, headers: { ...cors, 'content-type': 'application/json' }, body: JSON.stringify(out.body) });
     });
   };
