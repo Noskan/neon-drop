@@ -77,6 +77,10 @@
           <span class="nav-glyph">🏆</span>
           <span class="nav-text">Prestígio</span>
         </button>
+        <button class="tab-btn" data-tab="leaderboard">
+          <span class="nav-glyph">🏅</span>
+          <span class="nav-text">Ranking</span>
+        </button>
       </nav>
     </aside>
 
@@ -276,6 +280,64 @@
         <div class="stats-grid" id="stats-grid"></div>
         <div class="reset-zone">
           <button id="reset-save-btn" class="btn-danger">Resetar Progresso Salvo</button>
+        </div>
+      </section>
+
+      <!-- TAB 5: GLOBAL LEADERBOARD (RANKING DE OPERADORES) -->
+      <section id="tab-leaderboard" class="tab-content">
+        <div class="lb-header-card">
+          <div class="lb-identity-box">
+            <div>
+              <h2>🏅 Ranking Global de Operadores</h2>
+              <p style="color: var(--muted); font-size: 13px; margin-top: 4px;">
+                Defina seu Callsign para publicar sua Patente, Prestígio, Patrimônio e Coleção em tempo real.
+              </p>
+            </div>
+            <span class="pill-outline" id="lb-sync-status">🟢 Pronto para sincronizar</span>
+          </div>
+
+          <div class="lb-controls-row">
+            <div class="lb-callsign-group">
+              <label for="lb-callsign-input">SEU CALLSIGN / NICK:</label>
+              <input
+                type="text"
+                id="lb-callsign-input"
+                class="lb-input"
+                maxlength="18"
+                placeholder="Ex: Noskan"
+              />
+              <button id="lb-sync-btn" class="btn-open">📡 Salvar &amp; Publicar no Placar</button>
+              <button id="lb-refresh-btn" class="btn-secondary">🔄 Atualizar</button>
+            </div>
+
+            <div class="collection-filter-group" id="lb-sort-group">
+              <button class="col-filter-btn active" data-lbsort="prestige">🎖️ Patente &amp; Prestígio</button>
+              <button class="col-filter-btn" data-lbsort="networth">💰 Patrimônio Total</button>
+              <button class="col-filter-btn" data-lbsort="collection">🎒 Coleção &amp; Platinas</button>
+              <button class="col-filter-btn" data-lbsort="bestdrop">★ Maior Drop</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Top 3 Podium -->
+        <div class="lb-podium-grid" id="lb-podium-grid"></div>
+
+        <!-- Full Operators Table -->
+        <div class="lb-table-card">
+          <table class="lb-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Operador</th>
+                <th>Patente &amp; Prestígio</th>
+                <th>Patrimônio (Saldo + Inv.)</th>
+                <th>Renda ($/s)</th>
+                <th>Coleção &amp; Platinas</th>
+                <th>Melhor Drop</th>
+              </tr>
+            </thead>
+            <tbody id="lb-table-body"></tbody>
+          </table>
         </div>
       </section>
     </main>

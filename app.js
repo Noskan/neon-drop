@@ -911,6 +911,8 @@ const sfx = new SoundEngine();
 // STATE MANAGEMENT
 // =====================================================
 const defaultState = {
+  playerId: 'op_' + Math.random().toString(36).slice(2, 10),
+  callsign: '',
   balance: 500,
   lastSavedAt: Date.now(),
   prestigeLevel: 0,
@@ -944,6 +946,8 @@ function loadState() {
       const merged = {
         ...defaultState,
         ...parsed,
+        playerId: parsed.playerId || ('op_' + Math.random().toString(36).slice(2, 10)),
+        callsign: typeof parsed.callsign === 'string' ? parsed.callsign : '',
         heirloomUids: Array.isArray(parsed.heirloomUids) ? parsed.heirloomUids : [],
         stats: {
           ...defaultState.stats,
@@ -962,7 +966,9 @@ function loadState() {
   } catch (e) {
     console.warn('Erro ao carregar save:', e);
   }
-  return structuredClone(defaultState);
+  const fresh = structuredClone(defaultState);
+  fresh.playerId = 'op_' + Math.random().toString(36).slice(2, 10);
+  return fresh;
 }
 
 function saveState() {
@@ -1741,6 +1747,7 @@ document.getElementById('modal-keep-btn').addEventListener('click', () => {
     renderCaseSelector();
     renderActiveCaseArena();
     renderInventory();
+    publishMyScoreToCloud(false);
   }
   document.getElementById('reward-modal').classList.add('hidden');
 });
@@ -1754,6 +1761,7 @@ document.getElementById('modal-sell-btn').addEventListener('click', () => {
     sfx.coin();
     saveState();
     updateTopBar();
+    publishMyScoreToCloud(false);
   }
   document.getElementById('reward-modal').classList.add('hidden');
 });
@@ -2480,7 +2488,325 @@ document.getElementById('prestige-btn')?.addEventListener('click', () => {
     renderInventory();
     renderTradeUp();
     renderStats();
+    publishMyScoreToCloud(true);
   }
+});
+
+// =====================================================
+// GLOBAL LEADERBOARD ENGINE (CLOUD REAL-TIME SYNC)
+// =====================================================
+const LB_TOPIC = 'neondrop_lb_v3_noskan';
+const LB_CACHE_KEY = 'neondrop_lb_cache_v3';
+let lbSortBy = 'prestige'; // 'prestige' | 'networth' | 'collection' | 'bestdrop'
+let lastCloudPublishAt = 0;
+let lbPlayersMap = loadLeaderboardCache();
+
+function loadLeaderboardCache() {
+  try {
+    const raw = localStorage.getItem(LB_CACHE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        delete parsed.test_init;
+        return parsed;
+      }
+    }
+  } catch (e) {
+    // ignore cache error
+  }
+  return {};
+}
+
+function saveLeaderboardCache() {
+  try {
+    localStorage.setItem(LB_CACHE_KEY, JSON.stringify(lbPlayersMap));
+  } catch (e) {
+    // ignore quota error
+  }
+}
+
+function escapeHTML(str) {
+  return String(str || '').replace(/[&<>"']/g, (ch) => {
+    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+    return map[ch] || ch;
+  });
+}
+
+function buildMyLeaderboardEntry() {
+  const { ratePerSec, uniqueSkinsCount } = computePassiveIncome();
+  const ownedSet = getOwnedKeySet();
+  let platinumCases = 0;
+  ALL_CASES.forEach((c) => {
+    if (getCaseMasteryStatus(c, ownedSet).stage === 2) platinumCases++;
+  });
+  const invTotal = state.inventory.reduce((acc, i) => acc + (i.price || 0), 0);
+  const netWorth = Number((state.balance + invTotal).toFixed(2));
+  const mil = getMilitaryLevelInfo();
+  const cleanCallsign =
+    (state.callsign || '').trim().slice(0, 18) ||
+    'Operador-' + String(state.playerId || '0000').slice(-4).toUpperCase();
+
+  return {
+    playerId: state.playerId,
+    callsign: cleanCallsign,
+    prestigeLevel: state.prestigeLevel || 0,
+    milLevel: mil.level,
+    xp: state.xp || 0,
+    netWorth,
+    passiveRate: ratePerSec,
+    uniqueSkins: uniqueSkinsCount,
+    platinumCases,
+    bestDropValue: state.stats.bestDropValue || 0,
+    goldsUnboxed: state.stats.goldsUnboxed || 0,
+    casesOpened: state.stats.casesOpened || 0,
+    updatedAt: Date.now(),
+  };
+}
+
+function mergeLeaderboardEntry(entry) {
+  if (!entry || !entry.playerId || entry.playerId === 'test_init') return;
+  const prev = lbPlayersMap[entry.playerId];
+  if (!prev || (entry.updatedAt || 0) >= (prev.updatedAt || 0)) {
+    lbPlayersMap[entry.playerId] = {
+      playerId: String(entry.playerId),
+      callsign: String(entry.callsign || 'Operador').slice(0, 18),
+      prestigeLevel: Number(entry.prestigeLevel) || 0,
+      milLevel: Math.min(55, Math.max(1, Number(entry.milLevel) || 1)),
+      xp: Number(entry.xp) || 0,
+      netWorth: Number(entry.netWorth) || 0,
+      passiveRate: Number(entry.passiveRate) || 0.15,
+      uniqueSkins: Number(entry.uniqueSkins) || 0,
+      platinumCases: Number(entry.platinumCases) || 0,
+      bestDropValue: Number(entry.bestDropValue) || 0,
+      goldsUnboxed: Number(entry.goldsUnboxed) || 0,
+      casesOpened: Number(entry.casesOpened) || 0,
+      updatedAt: Number(entry.updatedAt) || Date.now(),
+    };
+  }
+}
+
+async function fetchGlobalLeaderboard() {
+  const statusEl = document.getElementById('lb-sync-status');
+  if (statusEl) statusEl.textContent = '🔄 Sincronizando placar global...';
+
+  try {
+    const res = await fetch(`https://ntfy.sh/${LB_TOPIC}/json?poll=1&since=all`, {
+      cache: 'no-store',
+    });
+    if (res.ok) {
+      const text = await res.text();
+      const lines = text.split('\n').filter((l) => l.trim().length > 0);
+      lines.forEach((line) => {
+        try {
+          const envelope = JSON.parse(line);
+          if (envelope && envelope.event === 'message' && envelope.message) {
+            const payload = JSON.parse(envelope.message);
+            mergeLeaderboardEntry(payload);
+          }
+        } catch (err) {
+          // ignore malformed line
+        }
+      });
+      saveLeaderboardCache();
+      if (statusEl) {
+        const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        statusEl.textContent = `🟢 Placar Online • Atualizado às ${timeStr}`;
+      }
+    }
+  } catch (err) {
+    if (statusEl) statusEl.textContent = '🟡 Modo Cache Local (Offline)';
+  }
+
+  renderLeaderboard();
+}
+
+async function publishMyScoreToCloud(force = false) {
+  const now = Date.now();
+  const myEntry = buildMyLeaderboardEntry();
+  mergeLeaderboardEntry(myEntry);
+  saveLeaderboardCache();
+
+  // Only auto-publish if player has set a Callsign or opened at least 1 case, and throttle unless forced
+  if (!force && now - lastCloudPublishAt < 25000) return;
+  if (!force && !state.callsign && (state.stats.casesOpened || 0) < 1) return;
+
+  lastCloudPublishAt = now;
+  const statusEl = document.getElementById('lb-sync-status');
+  if (force && statusEl) statusEl.textContent = '📡 Enviando dados para o placar...';
+
+  try {
+    await fetch(`https://ntfy.sh/${LB_TOPIC}`, {
+      method: 'POST',
+      body: JSON.stringify(myEntry),
+    });
+    if (statusEl) {
+      const timeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      statusEl.textContent = `🟢 Sincronizado como "${myEntry.callsign}" (${timeStr})`;
+    }
+  } catch (err) {
+    if (statusEl) statusEl.textContent = '🟡 Salvo localmente';
+  }
+
+  renderLeaderboard();
+}
+
+function initLeaderboardLiveStream() {
+  try {
+    const es = new EventSource(`https://ntfy.sh/${LB_TOPIC}/sse`);
+    es.onmessage = (evt) => {
+      try {
+        const data = JSON.parse(evt.data);
+        if (data && data.message) {
+          const payload = JSON.parse(data.message);
+          mergeLeaderboardEntry(payload);
+          saveLeaderboardCache();
+          if (document.getElementById('tab-leaderboard')?.classList.contains('active')) {
+            renderLeaderboard();
+          }
+        }
+      } catch (e) {
+        // ignore parse error
+      }
+    };
+  } catch (e) {
+    // EventSource optional
+  }
+}
+
+function getSortedLeaderboardEntries() {
+  // Always ensure current player's live stats are up-to-date in the map
+  const myEntry = buildMyLeaderboardEntry();
+  mergeLeaderboardEntry(myEntry);
+
+  const list = Object.values(lbPlayersMap).filter((p) => p && p.playerId !== 'test_init');
+
+  list.sort((a, b) => {
+    if (lbSortBy === 'networth') {
+      return b.netWorth - a.netWorth || b.prestigeLevel - a.prestigeLevel;
+    }
+    if (lbSortBy === 'collection') {
+      return (
+        b.platinumCases - a.platinumCases ||
+        b.uniqueSkins - a.uniqueSkins ||
+        b.netWorth - a.netWorth
+      );
+    }
+    if (lbSortBy === 'bestdrop') {
+      return b.bestDropValue - a.bestDropValue || b.netWorth - a.netWorth;
+    }
+    // Default: 'prestige'
+    return (
+      b.prestigeLevel - a.prestigeLevel ||
+      b.milLevel - a.milLevel ||
+      b.netWorth - a.netWorth
+    );
+  });
+
+  return list;
+}
+
+function formatRankLabelForEntry(p) {
+  const pInfo = PRESTIGE_TIERS.find((t) => t.level === p.prestigeLevel);
+  if (pInfo) {
+    return `Prestígio ${pInfo.roman} (${pInfo.name}) • Nv. ${p.milLevel}`;
+  }
+  return `Nv. ${p.milLevel} • ${getMilitaryRankTitle(p.milLevel)}`;
+}
+
+function renderLeaderboard() {
+  const callsignInput = document.getElementById('lb-callsign-input');
+  if (callsignInput && document.activeElement !== callsignInput) {
+    callsignInput.value = state.callsign || '';
+  }
+
+  const entries = getSortedLeaderboardEntries();
+  const podiumGrid = document.getElementById('lb-podium-grid');
+  const tbody = document.getElementById('lb-table-body');
+  if (!podiumGrid || !tbody) return;
+
+  // Render Top 3 Podium
+  const top3 = entries.slice(0, 3);
+  const medals = ['🥇 #1 LÍDER GLOBAL', '🥈 #2 VICE-LÍDER', '🥉 #3 TOP 3'];
+  podiumGrid.innerHTML = top3
+    .map((p, idx) => {
+      const isMe = p.playerId === state.playerId;
+      return `
+        <div class="lb-podium-card rank-${idx + 1} ${isMe ? 'is-me' : ''}">
+          <span class="lb-podium-medal">${medals[idx]}</span>
+          <div class="lb-podium-emblem">${getPrestigeEmblemSVG(p.prestigeLevel, p.milLevel)}</div>
+          <strong style="font-size: 16px; color: var(--ink);">
+            ${escapeHTML(p.callsign)} ${isMe ? '<span class="pill-badge" style="margin-left:4px;">VOCÊ</span>' : ''}
+          </strong>
+          <span style="font-size: 12px; color: var(--secondary); font-weight: 800;">
+            ${formatRankLabelForEntry(p)}
+          </span>
+          <div style="font-size: 18px; font-weight: 800; color: var(--primary); margin-top: 4px;">
+            ${formatMoney(p.netWorth)}
+          </div>
+          <span style="font-size: 11px; color: var(--muted);">
+            +${formatMoney(p.passiveRate)}/s • 🎒 ${p.uniqueSkins}/252 • 🏆 ${p.platinumCases}/18 Plat.
+          </span>
+        </div>
+      `;
+    })
+    .join('');
+
+  // Render Full Table
+  tbody.innerHTML = entries
+    .map((p, idx) => {
+      const isMe = p.playerId === state.playerId;
+      return `
+        <tr class="${isMe ? 'is-me-row' : ''}">
+          <td><strong>#${idx + 1}</strong></td>
+          <td>
+            <div class="lb-op-cell">
+              <div class="lb-mini-emblem">${getPrestigeEmblemSVG(p.prestigeLevel, p.milLevel)}</div>
+              <div>
+                <strong>${escapeHTML(p.callsign)}</strong>
+                ${isMe ? '<span class="pill-badge" style="margin-left:6px;">VOCÊ</span>' : ''}
+                <div style="font-size: 11px; color: var(--muted);">${p.casesOpened} caixas • ${p.goldsUnboxed} ★ Apex</div>
+              </div>
+            </div>
+          </td>
+          <td>
+            <span style="color: ${p.prestigeLevel > 0 ? 'var(--secondary)' : 'var(--ink)'}; font-weight: 800;">
+              ${formatRankLabelForEntry(p)}
+            </span>
+          </td>
+          <td style="color: var(--primary); font-weight: 800;">${formatMoney(p.netWorth)}</td>
+          <td>+${formatMoney(p.passiveRate)}/s</td>
+          <td>
+            <strong>${p.uniqueSkins} / 252</strong>
+            <span style="color: var(--muted); font-size: 11px; margin-left: 4px;">(🏆 ${p.platinumCases}/18)</span>
+          </td>
+          <td style="color: #ffd700; font-weight: 800;">${formatMoney(p.bestDropValue)}</td>
+        </tr>
+      `;
+    })
+    .join('');
+}
+
+document.getElementById('lb-sync-btn')?.addEventListener('click', () => {
+  const input = document.getElementById('lb-callsign-input');
+  if (input) {
+    state.callsign = input.value.trim().slice(0, 18);
+    saveState();
+  }
+  sfx.coin();
+  publishMyScoreToCloud(true);
+});
+
+document.getElementById('lb-refresh-btn')?.addEventListener('click', () => {
+  fetchGlobalLeaderboard();
+});
+
+document.querySelectorAll('#lb-sort-group .col-filter-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#lb-sort-group .col-filter-btn').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    lbSortBy = btn.getAttribute('data-lbsort') || 'prestige';
+    renderLeaderboard();
+  });
 });
 
 // Multi-Open Count Selector (1x, 2x, 3x, 5x)
@@ -2546,6 +2872,10 @@ document.querySelectorAll('.tab-btn').forEach((btn) => {
     }
     if (tabId === 'tradeup') renderTradeUp();
     if (tabId === 'stats') renderStats();
+    if (tabId === 'leaderboard') {
+      renderLeaderboard();
+      fetchGlobalLeaderboard();
+    }
   });
 });
 
@@ -2557,3 +2887,5 @@ renderCaseSelector();
 renderActiveCaseArena();
 renderInventory();
 checkOfflineEarnings();
+fetchGlobalLeaderboard();
+initLeaderboardLiveStream();
