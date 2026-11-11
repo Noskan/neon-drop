@@ -681,6 +681,9 @@ let FEATURED_CASES = [
   ALL_CASES[16], // T6 $50,000
 ];
 
+// Tier efetivamente aplicado à tela (o <select> pode ser mexido sem que a troca valha)
+let appliedTierFilter = 'ALL';
+
 function hashStr(str = '') {
   let h = 0;
   for (let i = 0; i < str.length; i++) {
@@ -753,6 +756,7 @@ function migrateAndRebalanceInventory() {
 }
 
 function applyTierFilter(tierVal = 'ALL') {
+  appliedTierFilter = String(tierVal);
   if (tierVal === 'ALL') {
     FEATURED_CASES = [
       ALL_CASES[0],
@@ -775,11 +779,15 @@ function applyTierFilter(tierVal = 'ALL') {
 }
 
 document.getElementById('tier-filter-select')?.addEventListener('change', (e) => {
-  if (isSpinning) return;
+  if (isSpinning) {
+    // Troca recusada durante a roleta: o seletor volta a mostrar o que está valendo
+    e.target.value = appliedTierFilter;
+    return;
+  }
   applyTierFilter(e.target.value);
 });
 
-function populateCatalogDropdown(tierFilter = document.getElementById('tier-filter-select')?.value || 'ALL') {
+function populateCatalogDropdown(tierFilter = appliedTierFilter) {
   const select = document.getElementById('all-cases-select');
   select.innerHTML = '';
   const visibleCases =
@@ -812,7 +820,10 @@ function populateCatalogDropdown(tierFilter = document.getElementById('tier-filt
 }
 
 document.getElementById('all-cases-select').addEventListener('change', (e) => {
-  if (isSpinning) return;
+  if (isSpinning) {
+    e.target.value = activeCase.id;
+    return;
+  }
   const chosen = ALL_CASES.find((c) => c.id === e.target.value);
   if (chosen) {
     activeCase = chosen;
@@ -954,6 +965,8 @@ const defaultState = {
   xp: 0,
   heirloomUids: [],
   inventory: [],
+  // Modo local: itens já pagos que ainda estão na roleta / no modal de recompensa
+  pendingBatch: [],
   stats: {
     casesOpened: 0,
     totalSpent: 0,
@@ -1035,6 +1048,11 @@ function loadState() {
           ...(parsed.stats || {}),
         },
       };
+      // A página fechou com itens pagos ainda na roleta ou no modal: eles entram na coleção
+      if (Array.isArray(parsed.pendingBatch) && parsed.pendingBatch.length) {
+        merged.inventory = [...(Array.isArray(merged.inventory) ? merged.inventory : []), ...parsed.pendingBatch];
+      }
+      merged.pendingBatch = [];
       // Backfill XP for existing saves that didn't have XP tracked yet
       if (typeof parsed.xp !== 'number') {
         merged.xp =
@@ -1626,6 +1644,8 @@ function updateOpenButtonLabel() {
 }
 
 function buildRouletteLanes() {
+  // Vender um item ou trocar de aba no meio do giro redesenha a arena: a roleta em movimento fica
+  if (isSpinning) return;
   const stack = document.getElementById('roulette-stack');
   stack.className = `roulette-stack ${multiCount > 1 ? 'compact' : ''}`;
   stack.innerHTML = '';
@@ -1738,12 +1758,15 @@ function spinRoulette() {
 
   addTacticalXP(earnedBatchXP);
   updateTopBar();
+  const batch = currentUnboxedBatch;
+  state.pendingBatch = batch;
   saveState();
 
-  playRouletteAnimation(currentUnboxedBatch, () => {
+  playRouletteAnimation(batch, () => {
     isSpinning = false;
     document.getElementById('open-case-btn').disabled = false;
-    showRewardModal(currentUnboxedBatch);
+    currentUnboxedBatch = batch;
+    showRewardModal(batch);
   });
 }
 
@@ -1765,15 +1788,18 @@ async function spinRouletteOnServer() {
 
   // Débito, XP e estatísticas valem já; os itens entram na coleção quando a roleta parar
   applyServerProfile(res.profile);
-  currentUnboxedBatch = res.items.map(itemFromServer);
+  const batch = res.items.map(itemFromServer);
+  currentUnboxedBatch = batch;
   updateTopBar();
 
-  playRouletteAnimation(currentUnboxedBatch, () => {
+  playRouletteAnimation(batch, () => {
     isSpinning = false;
     openBtn.disabled = false;
-    state.inventory.push(...currentUnboxedBatch);
+    currentUnboxedBatch = batch;
+    const owned = new Set(state.inventory.map((i) => i.uid));
+    state.inventory.push(...batch.filter((i) => !owned.has(i.uid)));
     updateTopBar();
-    showRewardModal(currentUnboxedBatch);
+    showRewardModal(batch);
   });
 }
 
@@ -1914,6 +1940,7 @@ document.getElementById('modal-keep-btn').addEventListener('click', () => {
   if (currentUnboxedBatch.length) {
     state.inventory.push(...currentUnboxedBatch);
     currentUnboxedBatch = [];
+    state.pendingBatch = [];
     saveState();
     updateTopBar();
     renderCaseSelector();
@@ -1944,6 +1971,7 @@ document.getElementById('modal-sell-btn').addEventListener('click', async () => 
     state.balance = Number((state.balance + sum).toFixed(2));
     state.stats.totalEarned = Number((state.stats.totalEarned + sum).toFixed(2));
     currentUnboxedBatch = [];
+    state.pendingBatch = [];
     sfx.coin();
     saveState();
     updateTopBar();
@@ -2026,7 +2054,7 @@ function jumpToCaseAndOpenTab(caseId) {
   if (target && !isSpinning) {
     activeCase = target;
     const tierSelect = document.getElementById('tier-filter-select');
-    if (tierSelect && tierSelect.value !== 'ALL' && Number(tierSelect.value) !== target.tier) {
+    if (tierSelect && appliedTierFilter !== 'ALL' && Number(appliedTierFilter) !== target.tier) {
       // O filtro estava em outro Tier: acompanha a caixa, senão o seletor ficaria sem a opção dela
       tierSelect.value = String(target.tier);
       applyTierFilter(tierSelect.value);
@@ -2505,6 +2533,11 @@ document.getElementById('execute-tradeup-btn').addEventListener('click', () => {
   const currentRarity = tradeUpSelection[0].rarity;
   const nextRarity = RARITIES[currentRarity].next;
   if (!nextRarity) return;
+  if (isSpinning) {
+    // A roleta e o contrato usam o mesmo modal de recompensa: um de cada vez
+    showToast('⏳ Aguarde a roleta terminar para assinar o contrato.');
+    return;
+  }
 
   if (isServerMode()) {
     const uids = tradeUpSelection.map((i) => i.uid);
@@ -2521,14 +2554,20 @@ document.getElementById('execute-tradeup-btn').addEventListener('click', () => {
     return;
   }
 
+  // Mesma regra do servidor: o item sai da caixa de um dos 5 itens usados (sorteada entre eles),
+  // nunca da caixa ativa na tela, senão 5 itens baratos virariam um item da caixa mais cara
+  const sourceItem = tradeUpSelection[Math.floor(Math.random() * tradeUpSelection.length)];
+  const sourceCase = ALL_CASES.find((c) => c.id === sourceItem.caseId) || activeCase;
+
   const usedUids = new Set(tradeUpSelection.map((i) => i.uid));
   state.inventory = state.inventory.filter((i) => !usedUids.has(i.uid));
   tradeUpSelection = [];
   state.stats.tradeUpsDone = (state.stats.tradeUpsDone || 0) + 1;
   addTacticalXP(180);
 
-  const forged = generateItemInstance(activeCase, nextRarity);
+  const forged = generateItemInstance(sourceCase, nextRarity);
   currentUnboxedBatch = [forged];
+  state.pendingBatch = currentUnboxedBatch;
   saveState();
   updateTopBar();
   renderTradeUp();
@@ -2690,6 +2729,10 @@ function renderStats() {
 document.getElementById('prestige-btn')?.addEventListener('click', () => {
   const status = getNextPrestigeStatus();
   if (!status.canPrestige || !status.nextTier) return;
+  if (isSpinning) {
+    showToast('⏳ Aguarde a roleta terminar para entrar no Prestígio.');
+    return;
+  }
 
   const nt = status.nextTier;
   const nextPerks = getPrestigePerks(nt.level);
@@ -2894,6 +2937,11 @@ async function fetchGlobalLeaderboard() {
         renderLeaderboard();
         return;
       }
+      // Leitura falhou: fica com o último placar carregado. O tópico público do ntfy.sh aceita
+      // postagem de qualquer pessoa e não pode alimentar o placar oficial.
+      if (statusEl) statusEl.textContent = '🟡 Ranking indisponível agora • mostrando o último placar carregado';
+      renderLeaderboard();
+      return;
     }
 
     const res = await fetch(`https://ntfy.sh/${LB_TOPIC}/json?poll=1&since=all`, {
@@ -3227,6 +3275,11 @@ const AIM_RARITY_MULTS = {
 
 const AIM_COMBO_MAX = 2.0; // teto do multiplicador de combo (o servidor valida o mesmo teto)
 const AIM_TARGET_LIFETIME_MS = 1350; // um alvo não atingido some depois disso e zera o combo
+
+const GRIDSHOT_DURATION_MS = 30000;
+// O servidor só aceita rodadas de 28–40s em tempo real; acima disso o cliente nem envia
+const GRIDSHOT_MAX_REAL_MS = 38000;
+let gridshotStartedAt = 0;
 
 let aimStreak = 0;
 let aimSessionHits = 0;
@@ -3639,15 +3692,27 @@ async function startGridshotChallenge() {
   updateAimLabHUD();
   ensureAimTargetsCount(3);
 
+  // O fim da rodada é um horário, não uma contagem de ticks: timers atrasam (ou param) com a
+  // aba em segundo plano, e o servidor mede a rodada em tempo real.
+  gridshotStartedAt = Date.now();
   if (gridshotTimerId) clearInterval(gridshotTimerId);
-  gridshotTimerId = setInterval(() => {
-    gridshotTimeLeft--;
-    updateAimLabHUD();
-    if (gridshotTimeLeft <= 0) {
-      endGridshotChallenge();
-    }
-  }, 1000);
+  gridshotTimerId = setInterval(tickGridshotClock, 250);
 }
+
+function tickGridshotClock() {
+  if (!gridshotActive) return;
+  const left = Math.max(0, Math.ceil((gridshotStartedAt + GRIDSHOT_DURATION_MS - Date.now()) / 1000));
+  if (left !== gridshotTimeLeft) {
+    gridshotTimeLeft = left;
+    updateAimLabHUD();
+  }
+  if (left <= 0) endGridshotChallenge();
+}
+
+// Ao voltar para a aba, encerra na hora uma rodada cujo tempo já acabou
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) tickGridshotClock();
+});
 
 function endGridshotChallenge() {
   if (gridshotTimerId) {
@@ -3725,11 +3790,24 @@ async function finishGridshotOnServer() {
   const prevBest = state.stats.bestGridshotScore || 0;
   const accPct = shots > 0 ? Math.round((hits / shots) * 100) : 100;
   const equippedUid = getEquippedWeaponItem()?.uid || null;
+  const realMs = Date.now() - gridshotStartedAt;
 
   gridshotCooldownUntil = Date.now() + 15000;
   if (gridshotCooldownIntervalId) clearInterval(gridshotCooldownIntervalId);
   gridshotCooldownIntervalId = setInterval(updateCooldownButtonsUI, 500);
   updateCooldownButtonsUI();
+
+  if (realMs > GRIDSHOT_MAX_REAL_MS) {
+    // Aba em segundo plano ou aparelho suspenso: o servidor recusaria e marcaria a sessão como
+    // suspeita. A rodada é descartada aqui; a sessão aberta some na próxima rodada.
+    showGridshotBanner(
+      '⏸️ RODADA INTERROMPIDA',
+      'A rodada passou dos 30 segundos em tempo real (aba em segundo plano ou aparelho suspenso), então não foi enviada. Nenhuma recompensa foi paga.'
+    );
+    resyncServerState();
+    updateAimLabHUD();
+    return;
+  }
   showGridshotBanner('⏳ VALIDANDO RODADA NO SERVIDOR…', `Pontuação: ${score.toLocaleString('en-US')} pts • Alvos Abatidos: ${hits}`);
 
   let failure = null;
@@ -3922,12 +4000,6 @@ function applyServerDelta(res) {
 
 function refreshAllViews() {
   lastRenderedRankKey = '';
-  const hint = document.getElementById('tradeup-origin-hint');
-  if (hint) {
-    hint.textContent = isServerMode()
-      ? ' O item forjado vem da caixa de um dos 5 itens usados, sorteada pelo servidor.'
-      : '';
-  }
   populateCatalogDropdown();
   updateTopBar();
   renderCaseSelector();
@@ -4216,26 +4288,25 @@ async function bootServerMode() {
     }
   }
 
-  if (readStorage(SERVER_MODE_FLAG_KEY) === '1') {
-    const offline = lastError?.code === 'NETWORK';
-    showServerOverlay(
-      offline ? '📡 SEM CONEXÃO COM O SERVIDOR' : '⚠️ SERVIDOR INDISPONÍVEL',
-      offline
-        ? 'Seu progresso fica guardado no servidor. Confira sua internet e tente de novo.'
-        : 'Não foi possível abrir a sua conta de jogo agora. Tente novamente em instantes.',
-      bootServerMode
-    );
+  // Modo local só quando o banco respondeu que não tem o schema do jogo, e só para um navegador
+  // que nunca jogou no servidor. Qualquer outra falha (rede, limite de cadastro, erro do servidor)
+  // é temporária: jogar localmente criaria um progresso que some no próximo acesso.
+  if (lastError?.code === 'RPC_MISSING' && readStorage(SERVER_MODE_FLAG_KEY) !== '1') {
+    server.mode = 'legacy';
+    hideServerOverlay();
+    checkOfflineEarnings();
+    fetchGlobalLeaderboard();
     return;
   }
 
-  // Banco ainda sem o schema novo (ou login anônimo desligado): segue no modo local de antes
-  server.mode = 'legacy';
-  hideServerOverlay();
-  if (lastError?.code === 'NETWORK') {
-    showToast('📡 Servidor fora de alcance: jogando em modo local neste acesso.', 'error');
-  }
-  checkOfflineEarnings();
-  fetchGlobalLeaderboard();
+  const code = lastError?.code;
+  const [title, desc] =
+    code === 'NETWORK'
+      ? ['📡 SEM CONEXÃO COM O SERVIDOR', 'Seu progresso fica guardado no servidor. Confira sua internet e tente de novo.']
+      : code === 'AUTH_UNAVAILABLE'
+        ? ['⚠️ CONTA DE JOGO INDISPONÍVEL', 'Não foi possível criar ou abrir a sua conta de jogo agora. Tente novamente em alguns minutos.']
+        : ['⚠️ SERVIDOR INDISPONÍVEL', 'Não foi possível abrir a sua conta de jogo agora. Tente novamente em instantes.'];
+  showServerOverlay(title, desc, bootServerMode);
 }
 
 function enterAuthoritativeMode(st) {
@@ -4264,8 +4335,14 @@ function enterAuthoritativeMode(st) {
 }
 
 // Idle Passive Income Loop (runs every 250ms = 4 ticks/sec)
-let idleTickCounter = 0;
+let lastIdleTickAt = Date.now();
+let lastIdleSaveAt = Date.now();
+let idleCarry = 0; // fração de centavo ainda não creditada (modo local)
 setInterval(() => {
+  // Tempo real desde o último tick: em aba de fundo os timers disparam bem menos que 4x/s
+  const now = Date.now();
+  const elapsedSec = Math.min(12 * 3600, Math.max(0, (now - lastIdleTickAt) / 1000));
+  lastIdleTickAt = now;
   if (server.mode === 'booting') return;
   if (isServerMode()) {
     // Só projeção visual: o saldo oficial é recalculado no servidor a cada ação (lazy timestamp)
@@ -4275,15 +4352,18 @@ setInterval(() => {
   }
 
   const { ratePerSec } = computePassiveIncome();
-  if (ratePerSec > 0) {
-    state.balance = Number((state.balance + ratePerSec * 0.25).toFixed(2));
+  idleCarry += ratePerSec * elapsedSec;
+  const cents = Math.floor(idleCarry * 100);
+  if (cents > 0) {
+    state.balance = Number((state.balance + cents / 100).toFixed(2));
+    idleCarry -= cents / 100;
   }
 
   updateTopBar();
 
   // Persist to localStorage every 3 seconds
-  idleTickCounter++;
-  if (idleTickCounter % 12 === 0) {
+  if (now - lastIdleSaveAt >= 3000) {
+    lastIdleSaveAt = now;
     saveState();
   }
 }, 250);
@@ -4296,6 +4376,10 @@ document.getElementById('sound-toggle').addEventListener('click', (e) => {
 document.getElementById('open-case-btn').addEventListener('click', spinRoulette);
 
 document.getElementById('reset-save-btn').addEventListener('click', () => {
+  if (isSpinning) {
+    showToast('⏳ Aguarde a roleta terminar para resetar o progresso.');
+    return;
+  }
   if (isServerMode()) {
     if (
       !confirm(

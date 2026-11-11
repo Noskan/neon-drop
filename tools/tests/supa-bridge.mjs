@@ -27,6 +27,8 @@ export async function createBridge(schemaSqls) {
     db,
     anonEnabled: true,
     down: false, // true = every request fails at the network level
+    hang: false, // true = requests are accepted and never answered
+    failWith: null, // (method, url) => { status, body } to answer instead of the database
     log: [],
     tokens: new Map(), // access token -> user id
     refresh: new Map(), // refresh token -> user id
@@ -142,9 +144,12 @@ export async function createBridge(schemaSqls) {
         return route.abort();
       }
       if (bridge.down) return route.abort('internetdisconnected');
+      if (bridge.hang) return; // left pending until the page gives up
       const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' };
       if (req.method() === 'OPTIONS') return route.fulfill({ status: 200, headers: cors });
       const body = req.postData() ? JSON.parse(req.postData()) : {};
+      const forced = bridge.failWith ? bridge.failWith(req.method(), url) : null;
+      if (forced) return route.fulfill({ status: forced.status, headers: { ...cors, 'content-type': 'application/json' }, body: JSON.stringify(forced.body || {}) });
       const out = await bridge.handle(req.method(), url, req.headers(), body);
       return route.fulfill({ status: out.status, headers: { ...cors, 'content-type': 'application/json' }, body: JSON.stringify(out.body) });
     });

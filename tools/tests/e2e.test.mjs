@@ -329,6 +329,25 @@ const seed = async (bridge, uid, where, copies = 1, extra = '') => {
   ok(!!refused && end.best === score && end.hits === 15 && end.xp === after.xp, 'a round outside the 28-40 s window earns nothing on the server', JSON.stringify(end));
   ok((await page.evaluate(() => state.stats.targetsHit === 15 && state.xp)) === after.xp, 'and the on-screen preview of XP / targets is rolled back');
   ok((await one(bridge, `SELECT count(*)::int n FROM public.gridshot_sessions WHERE user_id = $1 AND flagged_cheat`, [uid])).n === 1, 'the refused session is flagged');
+
+  // third round: the device sleeps. 45 s of real time pass in a single jump (timers fire once)
+  backdate = true;
+  await bridge.sql(`UPDATE public.profiles SET next_gridshot_allowed_at = now() WHERE id = $1`, [uid]);
+  await page.clock.runFor(16000);
+  const submitsBefore = calls(bridge, 'submit_gridshot_rpc').length;
+  await page.click('#aimlab-start-gridshot-btn');
+  await until(() => page.evaluate(() => gridshotActive));
+  await page.clock.runFor(100);
+  for (let i = 0; i < 3; i++) { await hit(false); await page.clock.runFor(120); }
+  await page.clock.fastForward(45000);
+  const paused = await banner(/INTERROMPIDA/);
+  await p.idle();
+  await until(async () => (await page.evaluate(() => state.stats.targetsHit)) === 15);
+  ok(!!paused && !(await page.evaluate(() => gridshotActive)), 'the round ends by the wall clock even when the timers were frozen', paused || await page.textContent('#aimlab-banner-title'));
+  ok(calls(bridge, 'submit_gridshot_rpc').length === submitsBefore && (await one(bridge, `SELECT count(*)::int n FROM public.gridshot_sessions WHERE user_id = $1 AND flagged_cheat`, [uid])).n === 1,
+    'a round that lasted 45 s of real time is discarded by the client: nothing sent, no session flagged');
+  ok(/Nenhuma recompensa/.test(await page.textContent('#aimlab-banner-desc')) && (await page.evaluate(() => state.stats.targetsHit)) === 15 && (await page.evaluate(() => state.xp)) === end.xp,
+    'the player is told why, and the on-screen preview is rolled back');
   ok(p.errors.length === 0, 'no JS errors during the rounds', p.errors.join(' | '));
   await p.ctx.close();
 }
@@ -372,24 +391,90 @@ const seed = async (bridge, uid, where, copies = 1, extra = '') => {
 }
 
 // ===========================================================================
-// D. Database not migrated yet / anonymous sign-in off -> old local mode
+// D. Local mode only for a database without the game schema; other boot failures block
 // ===========================================================================
-for (const [label, make] of [
-  ['database still on the previous schema', async () => createBridge([PREV_SCHEMA])],
-  ['anonymous sign-in disabled (today\'s live state)', async () => { const b = await createBridge([NEW_SCHEMA]); b.anonEnabled = false; return b; }],
-]) {
-  const bridge = await make();
+{
+  const label = 'database still on the previous schema';
+  const bridge = await createBridge([PREV_SCHEMA]);
   const p = await player(bridge);
   const { page } = p;
   ok(await page.evaluate(() => server.mode) === 'legacy' && (await page.evaluate(() => document.getElementById('server-overlay').classList.contains('hidden'))), `${label}: game falls back to local mode`);
   ok(await p.openCase(), `${label}: opening a case works locally`);
+
+  // the page is closed with the reward still on screen: the paid item must not vanish
+  const pending = await page.evaluate(() => JSON.parse(localStorage.getItem('neondrop_save_v3')).pendingBatch.length);
+  await p.reload();
+  const kept = await page.evaluate(() => ({ inv: state.inventory.length, pending: state.pendingBatch.length, opened: state.stats.casesOpened, bal: state.balance }));
+  ok(pending === 1 && kept.inv === 1 && kept.pending === 0 && kept.opened === 1 && kept.bal < 500, `${label}: an item paid for but not yet confirmed survives a reload`, JSON.stringify({ pending, kept }));
+  const save = await until(() => page.evaluate(() => { const s = JSON.parse(localStorage.getItem('neondrop_save_v3')); return s.inventory.length === 1 && s.pendingBatch.length === 0 ? s : null; }), 6000);
+  ok(save && save.balance < 500 && p.errors.length === 0, `${label}: progress is saved in the browser as before, no JS errors`, p.errors.join(' | '));
+
+  // idle income follows real time, not the number of timer ticks
+  const idle = await page.evaluate(async () => {
+    state.inventory.push(generateItemInstance(ALL_CASES.find((c) => c.id === 'nx_t6_3'), 'gold'));
+    const rate = computePassiveIncome().ratePerSec;
+    await new Promise((r) => setTimeout(r, 300));
+    const b0 = state.balance;
+    lastIdleTickAt = Date.now() - 10000; // the tab was throttled for 10 s
+    await new Promise((r) => setTimeout(r, 700));
+    return { rate, gained: state.balance - b0 };
+  });
+  ok(idle.rate > 0 && idle.gained >= idle.rate * 10 - 0.011 && idle.gained <= idle.rate * 11.5 + 0.011, `${label}: a 10 s gap between ticks pays 10 s of income`, JSON.stringify(idle));
+
+  // trade-up: the forged item comes from the inputs' case, not from the case on screen
+  const forged = await page.evaluate(() => {
+    const base = generateItemInstance(ALL_CASES.find((c) => c.id === 'nx_t1_2'), 'blue');
+    const five = Array.from({ length: 5 }, (_, i) => ({ ...base, uid: 'tu_' + i }));
+    state.inventory.push(...five);
+    jumpToCaseAndOpenTab('nx_t6_3');
+    tradeUpSelection = five;
+    const btn = document.getElementById('execute-tradeup-btn');
+    btn.disabled = false;
+    btn.click();
+    const out = currentUnboxedBatch[0];
+    return { active: activeCase.id, caseId: out?.caseId, rarity: out?.rarity, pending: state.pendingBatch.length, left: state.inventory.filter((i) => String(i.uid).startsWith('tu_')).length };
+  });
+  ok(forged.active === 'nx_t6_3' && forged.caseId === 'nx_t1_2' && forged.rarity === 'purple' && forged.pending === 1 && forged.left === 0,
+    `${label}: five cheap items forge an item of their own case while the $65,000 case is on screen`, JSON.stringify(forged));
   await page.click('#modal-keep-btn');
-  const save = await page.evaluate(() => JSON.parse(localStorage.getItem('neondrop_save_v3')));
-  ok(save && save.inventory.length === 1 && save.balance < 500 && p.errors.length === 0, `${label}: progress is saved in the browser as before, no JS errors`, p.errors.join(' | '));
+  ok(await page.evaluate(() => state.pendingBatch.length === 0 && state.inventory.some((i) => i.caseId === 'nx_t1_2' && i.rarity === 'purple')), `${label}: keeping the forged item clears the pending list`);
+
   await p.tab('leaderboard');
   await sleep(400);
   ok(p.errors.length === 0, `${label}: leaderboard tab opens without errors`, p.errors.join(' | '));
   await p.ctx.close();
+}
+{
+  const overlayTitle = (page, re) => until(async () => { const t = await page.evaluate(() => document.getElementById('server-overlay-title')?.textContent || ''); return re.test(t) ? t : null; }, 15000);
+  const blocked = async (page) => (await page.evaluate(() => server.mode)) === 'booting' && (await page.isVisible('#server-overlay-retry')) && (await page.evaluate(() => localStorage.getItem('neondrop_save_v3'))) === null;
+
+  // a first-time visitor whose account cannot be created (sign-up refused / rate limited)
+  const bridge = await createBridge([NEW_SCHEMA]);
+  bridge.anonEnabled = false;
+  const p = await player(bridge, { noLoad: true });
+  const { page } = p;
+  await page.goto(ORIGIN + '/index.html', { waitUntil: 'load' });
+  const t1 = await overlayTitle(page, /CONTA DE JOGO INDISPONÍVEL/);
+  ok(!!t1 && (await blocked(page)), 'sign-up refused on a first visit: blocking screen with retry, no throwaway local game', t1 || '');
+  bridge.anonEnabled = true;
+  await page.evaluate(() => { window.neonBackend.signupBlockedUntil = 0; });
+  await page.click('#server-overlay-retry');
+  await p.ready();
+  ok((await page.evaluate(() => server.mode)) === 'authoritative', 'retry once the server accepts sign-ups enters server mode');
+  await p.ctx.close();
+
+  // a first-time visitor while the database answers with an error
+  const bridge2 = await createBridge([NEW_SCHEMA]);
+  bridge2.failWith = (method, url) => (url.pathname.endsWith('/rpc/get_my_state_rpc') ? { status: 400, body: { code: 'XX000', message: 'internal error' } } : null);
+  const p2 = await player(bridge2, { noLoad: true });
+  await p2.page.goto(ORIGIN + '/index.html', { waitUntil: 'load' });
+  const t2 = await overlayTitle(p2.page, /SERVIDOR INDISPONÍVEL/);
+  ok(!!t2 && (await blocked(p2.page)), 'server error on a first visit: blocking screen as well', t2 || '');
+  bridge2.failWith = null;
+  await p2.page.click('#server-overlay-retry');
+  await p2.ready();
+  ok((await p2.page.evaluate(() => server.mode)) === 'authoritative' && p2.errors.length === 0, 'retry after the server recovers enters server mode', p2.errors.join(' | '));
+  await p2.ctx.close();
 }
 
 // ===========================================================================
@@ -407,6 +492,21 @@ for (const [label, make] of [
   const toast = await until(() => p.toast());
   ok(/Sem resposta do servidor/.test(toast || '') && !(await page.evaluate(() => isSpinning)) && !(await page.isDisabled('#open-case-btn')) && (await page.evaluate(() => state.inventory.length)) === 1,
     'connection lost mid-session: the action is refused with a notice, nothing is invented locally', toast);
+
+  // connection that accepts the request and never answers
+  bridge.down = false;
+  bridge.hang = true;
+  await page.evaluate(() => { window.neonBackend.requestTimeoutMs = 600; });
+  await until(async () => !(await p.toast()), 8000);
+  const sentBefore = calls(bridge, 'open_case_rpc').length;
+  await page.click('#open-case-btn');
+  const hung = await until(() => p.toast(), 6000);
+  const free = await until(() => page.evaluate(() => !isSpinning && !server.busy), 6000);
+  const hungState = { free: !!free, btnDisabled: await page.isDisabled('#open-case-btn'), answered: calls(bridge, 'open_case_rpc').length - sentBefore, inv: await page.evaluate(() => state.inventory.length) };
+  ok(/Sem resposta do servidor/.test(hung || '') && hungState.free && !hungState.btnDisabled && hungState.answered === 0 && hungState.inv === 1,
+    'a request that never gets an answer is given up after the timeout and the game is usable again', `${hung} ${JSON.stringify(hungState)}`);
+  bridge.hang = false;
+  bridge.down = true;
 
   await page.reload({ waitUntil: 'load' });
   const overlay = await until(async () => { const t = await page.evaluate(() => document.getElementById('server-overlay-title')?.textContent || ''); return /SEM CONEXÃO/.test(t) ? t : null; }, 15000);
@@ -473,6 +573,71 @@ for (const [label, make] of [
   await p.reload();
   const afterReload = await page.evaluate(() => ({ tier: document.getElementById('tier-filter-select').value, active: activeCase.id, opts: document.getElementById('all-cases-select').options.length, scope: document.getElementById('inv-case-select').value }));
   ok(afterReload.tier === 'ALL' && afterReload.opts === 18 && afterReload.scope === 'ALL', 'after a reload the tier filter and the case list both start on "all"', JSON.stringify(afterReload));
+  ok(p.errors.length === 0, 'no JS errors', p.errors.join(' | '));
+  await p.ctx.close();
+}
+
+// ===========================================================================
+// G. Behaviour fixed after the app.js review: nothing else runs over a spinning roulette
+// ===========================================================================
+{
+  const bridge = await createBridge([NEW_SCHEMA]);
+  const p = await player(bridge);
+  const { page } = p;
+  const uid = await p.uid();
+  await seed(bridge, uid, `template_id = 'nx_t1_2_b2'`, 6);
+  await seed(bridge, uid, `template_id = 'nx_t1_1_b1'`, 1);
+  await p.reload();
+  const inv = async () => (await one(bridge, `SELECT count(*)::int n FROM public.inventory_items WHERE user_id = $1`, [uid])).n;
+  const spare = await page.evaluate(() => state.inventory.find((i) => i.templateId === 'nx_t1_1_b1').uid);
+
+  await p.tab('tradeup');
+  await page.click('#autofill-dupes-btn');
+  ok((await page.evaluate(() => tradeUpSelection.length)) === 5, 'five inputs selected for the contract');
+
+  // slow roulette, then everything that used to interfere with it
+  await p.tab('cases');
+  await page.uncheck('#fast-mode-checkbox');
+  await page.click('#open-case-btn');
+  await until(() => page.evaluate(() => isSpinning && currentUnboxedBatch.length === 1 && !server.busy));
+  const spun = await page.evaluate(() => currentUnboxedBatch[0].uid);
+  await page.evaluate(() => { document.querySelector('.roulette-strip').dataset.mark = 'spin'; });
+
+  await page.evaluate(() => document.getElementById('execute-tradeup-btn').click());
+  const wait = await until(() => p.toast());
+  await sleep(300);
+  ok(/Aguarde a roleta/.test(wait || '') && calls(bridge, 'execute_tradeup_rpc').length === 0 && (await page.evaluate(() => tradeUpSelection.length)) === 5 && (await page.evaluate((u) => currentUnboxedBatch[0].uid === u, spun)),
+    'the contract is refused while the roulette spins (drop on screen untouched)', wait || '');
+
+  const selects = await page.evaluate(() => {
+    const tier = document.getElementById('tier-filter-select');
+    const cases = document.getElementById('all-cases-select');
+    const before = { tier: tier.value, c: cases.value, opts: cases.options.length };
+    tier.value = '5'; tier.dispatchEvent(new Event('change', { bubbles: true }));
+    cases.value = cases.options[cases.options.length - 1].value; cases.dispatchEvent(new Event('change', { bubbles: true }));
+    return { before, tier: tier.value, c: cases.value, opts: cases.options.length, active: activeCase.id, applied: appliedTierFilter };
+  });
+  ok(selects.tier === selects.before.tier && selects.c === selects.before.c && selects.c === selects.active && selects.opts === selects.before.opts && selects.applied === 'ALL',
+    'tier and case selectors snap back to what is in effect when changed mid-spin', JSON.stringify(selects));
+
+  await page.evaluate((u) => sellItemByUid(u), spare);
+  await until(async () => (await inv()) === 7);
+  await p.idle();
+  ok((await page.evaluate(() => isSpinning && document.querySelector('.roulette-strip')?.dataset.mark === 'spin')) && (await page.evaluate(() => document.querySelectorAll('.roulette-strip > *').length)) > 20,
+    'selling an item mid-spin does not rebuild the roulette that is moving');
+
+  ok(await until(() => page.evaluate(() => !document.getElementById('reward-modal').classList.contains('hidden')), 15000), 'the spin finishes and shows its reward');
+  const shown = await page.evaluate((u) => ({ same: currentUnboxedBatch.length === 1 && currentUnboxedBatch[0].uid === u, copies: state.inventory.filter((i) => i.uid === u).length, n: state.inventory.length }), spun);
+  ok(shown.same && shown.copies === 1 && shown.n === (await inv()), 'the modal shows the item of this spin, stored exactly once', JSON.stringify(shown));
+  await page.click('#modal-keep-btn');
+
+  // leaderboard read fails: the open ntfy.sh topic is never used as a substitute
+  bridge.failWith = (method) => (method === 'GET' ? { status: 503, body: { message: 'upstream unavailable' } } : null);
+  await p.tab('leaderboard');
+  await page.evaluate(() => fetchGlobalLeaderboard());
+  const lbStatus = await until(async () => { const t = await page.textContent('#lb-sync-status'); return /indisponível/.test(t) ? t : null; });
+  ok(!!lbStatus && !p.external.some((u) => /ntfy\.sh/.test(u)), 'when the ranking cannot be read nothing is fetched from ntfy.sh', lbStatus || p.external.join(','));
+  bridge.failWith = null;
   ok(p.errors.length === 0, 'no JS errors', p.errors.join(' | '));
   await p.ctx.close();
 }

@@ -29,6 +29,15 @@ class NeonDropCommercialAdapter {
     // 'network' (sem conexão / servidor fora) ou 'rejected' (login anônimo desligado, limite atingido)
     this.lastAuthFailure = null;
     this.activeGridshotSessionId = null;
+    // Uma requisição que não responde nesse tempo é tratada como falha de rede
+    this.requestTimeoutMs = 15000;
+  }
+
+  // fetch com prazo: numa conexão que trava sem falhar, a promessa nunca se resolveria
+  fetchWithTimeout(url, options = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
   }
 
   // --------------------------------------------------------------------------
@@ -89,7 +98,7 @@ class NeonDropCommercialAdapter {
 
   async authRequest(path, body) {
     try {
-      const res = await fetch(`${this.url}/auth/v1/${path}`, {
+      const res = await this.fetchWithTimeout(`${this.url}/auth/v1/${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', apikey: this.anonKey },
         body: JSON.stringify(body),
@@ -183,7 +192,7 @@ class NeonDropCommercialAdapter {
     if (!this.isCommercialServerEnabled) return null;
     await this.ensureSession();
     const call = () =>
-      fetch(`${this.url}/rest/v1/rpc/${fnName}`, {
+      this.fetchWithTimeout(`${this.url}/rest/v1/rpc/${fnName}`, {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify(params),
@@ -306,7 +315,7 @@ class NeonDropCommercialAdapter {
       'player_id,callsign,prestige_level,mil_level,xp,net_worth,passive_rate_per_sec,unique_skins_count,platinum_cases_count,best_gridshot_score,best_drop_value,golds_unboxed,cases_opened,updated_at';
     // Leitura pública: não cria conta anônima só para quem está olhando o placar
     const get = (path) =>
-      fetch(`${this.url}/rest/v1/${path}`, { method: 'GET', headers: this.getHeaders(), cache: 'no-store' });
+      this.fetchWithTimeout(`${this.url}/rest/v1/${path}`, { method: 'GET', headers: this.getHeaders(), cache: 'no-store' });
 
     // Schema novo: view pública, só com quem registrou Callsign ou já abriu alguma caixa
     let res = await get(

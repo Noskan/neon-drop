@@ -110,7 +110,7 @@ Como a mira 2D roda a 60fps no cliente para ter latência zero no mouse, protege
 | §1 VIP: +25% XP, offline 24h, selo no ranking | `schema.sql` + `app.js` | Efeitos implementados. A ativação é por `grant_vip_days_admin` (só `service_role`). |
 | §5 Webhook de pagamento | `supabase/functions/payment-webhook` | Modelo genérico (HMAC) pronto, **não publicado**: depende da escolha do gateway. |
 
-O cliente (`app.js`) funciona em dois modos. Se `get_my_state_rpc` responde, o servidor é a autoridade e o navegador só pede ações e desenha a resposta. Se o banco ainda não tem o schema novo (ou o login anônimo está desligado), o jogo segue no modo local antigo, sem enviar nada ao ranking. Depois que um navegador jogou no modo servidor, ele não volta mais para o modo local: sem conexão, mostra uma tela de "tentar novamente".
+O cliente (`app.js`) funciona em dois modos. Se `get_my_state_rpc` responde, o servidor é a autoridade e o navegador só pede ações e desenha a resposta. Só quando o banco responde que não tem o schema novo (`get_my_state_rpc` inexistente) o jogo segue no modo local antigo, sem enviar nada ao ranking. Qualquer outra falha na abertura (sem conexão, cadastro anônimo recusado ou limitado, erro do servidor) mostra uma tela de "tentar novamente" em vez de abrir um jogo local, e um navegador que já jogou no modo servidor nunca volta para o modo local. Toda requisição ao Supabase tem prazo de 15 s. Com o Supabase configurado, o ranking nunca é lido do tópico público do ntfy.sh.
 
 ### Decisões que diferem do texto original
 
