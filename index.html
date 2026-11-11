@@ -63,6 +63,10 @@
           <span class="nav-glyph">📦</span>
           <span class="nav-text">Caixas</span>
         </button>
+        <button class="tab-btn" data-tab="aimlab">
+          <span class="nav-glyph">🎯</span>
+          <span class="nav-text">Treino 2D</span>
+        </button>
         <button class="tab-btn" data-tab="inventory">
           <span class="nav-glyph">🎒</span>
           <span class="nav-text">Coleção</span>
@@ -314,6 +318,7 @@
               <button class="col-filter-btn active" data-lbsort="prestige">🎖️ Patente &amp; Prestígio</button>
               <button class="col-filter-btn" data-lbsort="networth">💰 Patrimônio Total</button>
               <button class="col-filter-btn" data-lbsort="collection">🎒 Coleção &amp; Platinas</button>
+              <button class="col-filter-btn" data-lbsort="aimlab">🎯 Aim Lab (30s)</button>
               <button class="col-filter-btn" data-lbsort="bestdrop">★ Maior Drop</button>
             </div>
           </div>
@@ -333,11 +338,79 @@
                 <th>Patrimônio (Saldo + Inv.)</th>
                 <th>Renda ($/s)</th>
                 <th>Coleção &amp; Platinas</th>
+                <th>🎯 Gridshot 30s</th>
                 <th>Melhor Drop</th>
               </tr>
             </thead>
             <tbody id="lb-table-body"></tbody>
           </table>
+        </div>
+      </section>
+
+      <!-- TAB 6: 2D TACTICAL AIM LAB (CAMPO DE TIRO) -->
+      <section id="tab-aimlab" class="tab-content">
+        <div class="aimlab-loadout-bar">
+          <div class="aimlab-equipped-card">
+            <div class="aimlab-weapon-thumb" id="aimlab-weapon-art"></div>
+            <div class="aimlab-weapon-meta">
+              <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <span class="pill-badge" id="aimlab-mult-badge">1.00x ARMA</span>
+                <span class="pill-outline" id="aimlab-synctrack-pill" style="display: none;">SyncTrack™: 0</span>
+              </div>
+              <strong id="aimlab-weapon-name" style="font-size: 16px; color: var(--ink);">Arma Padrão de Treino</strong>
+              <span id="aimlab-weapon-sub" style="font-size: 12px; color: var(--muted);">
+                Equipe uma skin da sua Coleção para multiplicar o $ ganho por alvo abatido!
+              </span>
+            </div>
+          </div>
+
+          <div class="aimlab-controls">
+            <div class="aimlab-select-wrap">
+              <label for="aimlab-weapon-select">ARMA EQUIPADA:</label>
+              <select id="aimlab-weapon-select" class="select-input"></select>
+            </div>
+
+            <div class="collection-filter-group" id="aimlab-mode-group">
+              <button class="col-filter-btn active" data-aimmode="free">🎯 Modo Livre (Farm)</button>
+              <button class="col-filter-btn" data-aimmode="gridshot">⚡ Gridshot 30s (Desafio)</button>
+            </div>
+
+            <button id="aimlab-start-gridshot-btn" class="btn-open" style="display: none;">
+              ⚡ INICIAR GRIDSHOT (30s)
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Telemetry Strip -->
+        <div class="aimlab-hud-strip">
+          <div class="aimlab-stat-box">
+            <span>🔥 COMBO DE PRECISÃO</span>
+            <strong id="aimlab-combo-text" style="color: var(--primary);">1.00x (0 hits)</strong>
+          </div>
+          <div class="aimlab-stat-box">
+            <span>💵 RECOMPENSA POR ALVO</span>
+            <strong id="aimlab-payout-text" style="color: var(--primary);">+$1.20</strong>
+          </div>
+          <div class="aimlab-stat-box">
+            <span>🎯 PRECISÃO &amp; ABATES</span>
+            <strong id="aimlab-accuracy-text">100% (0 alvos)</strong>
+          </div>
+          <div class="aimlab-stat-box">
+            <span id="aimlab-mode-label">🏆 RECORDE GRIDSHOT 30s</span>
+            <strong id="aimlab-score-text" style="color: var(--secondary);">0 pts</strong>
+          </div>
+        </div>
+
+        <!-- 2D Tactical Shooting Range Arena -->
+        <div class="aimlab-stage" id="aimlab-stage">
+          <div class="aimlab-grid-overlay"></div>
+          <div class="aimlab-banner-overlay hidden" id="aimlab-banner-overlay">
+            <h2 id="aimlab-banner-title">⚡ DESAFIO GRIDSHOT 30s</h2>
+            <p id="aimlab-banner-desc">Destrua o máximo de alvos 2D em 30 segundos! Acertos no centro (Bullseye) valem +50% $ e +150 pts.</p>
+            <button id="aimlab-banner-btn" class="btn-open" style="margin-top: 12px;">COMEÇAR AGORA</button>
+          </div>
+          <div class="aimlab-targets-layer" id="aimlab-targets-layer"></div>
+          <div class="aimlab-hud-gun" id="aimlab-hud-gun"></div>
         </div>
       </section>
     </main>
