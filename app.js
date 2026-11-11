@@ -975,6 +975,49 @@ let isSpinning = false;
 let currentUnboxedBatch = [];
 let tradeUpSelection = [];
 
+// =====================================================
+// SERVER-AUTHORITATIVE MODE (COMMERCIAL-ARCHITECTURE.md §2–§4)
+// 'authoritative': o Supabase guarda saldo, inventário, XP e sorteios; o navegador só pede
+//                  ações e desenha o que o servidor devolve.
+// 'legacy':        banco ainda sem o schema novo (ou sem backend): economia local, como antes.
+// 'booting':       ainda descobrindo em qual dos dois modos estamos.
+// =====================================================
+const SERVER_MODE_FLAG_KEY = 'neondrop_server_mode_v1';
+const SERVER_PREFS_KEY = 'neondrop_prefs_v1';
+const LEGACY_IMPORT_FLAG_KEY = 'neondrop_legacy_imported_v1';
+
+const server = {
+  mode: window.neonBackend?.isCommercialServerEnabled ? 'booting' : 'legacy',
+  busy: false,
+  queue: Promise.resolve(),
+  balanceBase: 0, // saldo oficial na última resposta do servidor
+  balanceAt: 0, // performance.now() dessa resposta
+  rate: 0.15, // $/s oficial
+  capSec: 12 * 3600, // teto de renda acumulada sem falar com o servidor
+  isVip: false,
+  lastSyncAt: 0,
+};
+
+function isServerMode() {
+  return server.mode === 'authoritative';
+}
+
+function readStorage(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeStorage(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (e) {
+    // storage cheio ou indisponível: segue sem persistir
+  }
+}
+
 function loadState() {
   try {
     const raw = localStorage.getItem('neondrop_save_v3');
@@ -1010,6 +1053,12 @@ function loadState() {
 }
 
 function saveState() {
+  if (isServerMode()) {
+    // O progresso mora no servidor; aqui ficam só preferências locais (arma equipada).
+    // O save antigo (`neondrop_save_v3`) fica intocado.
+    writeStorage(SERVER_PREFS_KEY, JSON.stringify({ equippedUid: state.equippedUid || null }));
+    return;
+  }
   state.lastSavedAt = Date.now();
   localStorage.setItem('neondrop_save_v3', JSON.stringify(state));
 }
@@ -1408,7 +1457,8 @@ function computePassiveIncome() {
 
   const totalRate = Number(((0.15 + skinsRate) * combinedGlobalMult).toFixed(2));
   return {
-    ratePerSec: totalRate,
+    // No modo servidor vale o $/s oficial (mesma fórmula, calculada no PostgreSQL)
+    ratePerSec: isServerMode() ? server.rate : totalRate,
     uniqueSkinsCount: kept.length,
     achBonusPct: totalBonusPct,
     prestigeMult,
@@ -1431,15 +1481,20 @@ function checkOfflineEarnings() {
   state.balance = Number((state.balance + earned).toFixed(2));
   saveState();
   updateTopBar();
+  showOfflineEarningsModal(elapsedSec, earned, 12);
+}
 
+function showOfflineEarningsModal(elapsedSec, earned, capHours) {
   const hours = Math.floor(elapsedSec / 3600);
   const mins = Math.floor((elapsedSec % 3600) / 60);
   const timeStr = hours > 0 ? `${hours}h ${mins}min` : `${mins} minutos`;
 
   const timeEl = document.getElementById('offline-time-text');
+  const capEl = document.getElementById('offline-cap-text');
   const earnedEl = document.getElementById('offline-earned-price');
   const modal = document.getElementById('offline-modal');
   if (timeEl) timeEl.textContent = timeStr;
+  if (capEl) capEl.textContent = `${capHours}h`;
   if (earnedEl) earnedEl.textContent = `+${formatMoney(earned)}`;
   if (modal) modal.classList.remove('hidden');
 }
@@ -1628,6 +1683,11 @@ function spinRoulette() {
     return;
   }
 
+  if (isServerMode()) {
+    spinRouletteOnServer();
+    return;
+  }
+
   state.balance = Number((state.balance - totalCost).toFixed(2));
   state.stats.casesOpened += multiCount;
   state.stats.totalSpent = Number((state.stats.totalSpent + totalCost).toFixed(2));
@@ -1651,6 +1711,44 @@ function spinRoulette() {
   updateTopBar();
   saveState();
 
+  playRouletteAnimation(currentUnboxedBatch, () => {
+    isSpinning = false;
+    document.getElementById('open-case-btn').disabled = false;
+    showRewardModal(currentUnboxedBatch);
+  });
+}
+
+// O servidor sorteia, debita e grava os itens; a roleta só encena o resultado já decidido.
+async function spinRouletteOnServer() {
+  if (server.busy) return;
+  const caseObj = activeCase;
+  const count = multiCount;
+  const openBtn = document.getElementById('open-case-btn');
+  isSpinning = true;
+  openBtn.disabled = true;
+
+  const res = await serverAction(() => window.neonBackend.openCase(caseObj.id, count));
+  if (!res || !Array.isArray(res.items) || !res.items.length) {
+    isSpinning = false;
+    openBtn.disabled = false;
+    return;
+  }
+
+  // Débito, XP e estatísticas valem já; os itens entram na coleção quando a roleta parar
+  applyServerProfile(res.profile);
+  currentUnboxedBatch = res.items.map(itemFromServer);
+  updateTopBar();
+
+  playRouletteAnimation(currentUnboxedBatch, () => {
+    isSpinning = false;
+    openBtn.disabled = false;
+    state.inventory.push(...currentUnboxedBatch);
+    updateTopBar();
+    showRewardModal(currentUnboxedBatch);
+  });
+}
+
+function playRouletteAnimation(batch, onDone) {
   const TOTAL_TILES = 60;
   const WIN_INDEX = 48;
   const TILE_WIDTH = 140;
@@ -1662,7 +1760,7 @@ function spinRoulette() {
   const baseDurationMs = isFast ? 1500 : 5000;
   let maxDuration = baseDurationMs;
 
-  currentUnboxedBatch.forEach((winner, lane) => {
+  batch.forEach((winner, lane) => {
     const viewport = document.getElementById(`roulette-viewport-${lane}`);
     const strip = document.getElementById(`roulette-strip-${lane}`);
     strip.style.transition = 'none';
@@ -1717,11 +1815,7 @@ function spinRoulette() {
     }
   });
 
-  setTimeout(() => {
-    isSpinning = false;
-    document.getElementById('open-case-btn').disabled = false;
-    showRewardModal(currentUnboxedBatch);
-  }, maxDuration + 140);
+  setTimeout(onDone, maxDuration + 140);
 }
 
 function rollVisualFillerRarity() {
@@ -1777,6 +1871,16 @@ function showRewardModal(items) {
 }
 
 document.getElementById('modal-keep-btn').addEventListener('click', () => {
+  if (isServerMode()) {
+    // Os itens já estão gravados no inventário do servidor: guardar é só fechar
+    currentUnboxedBatch = [];
+    updateTopBar();
+    renderCaseSelector();
+    renderActiveCaseArena();
+    renderInventory();
+    document.getElementById('reward-modal').classList.add('hidden');
+    return;
+  }
   if (currentUnboxedBatch.length) {
     state.inventory.push(...currentUnboxedBatch);
     currentUnboxedBatch = [];
@@ -1790,7 +1894,21 @@ document.getElementById('modal-keep-btn').addEventListener('click', () => {
   document.getElementById('reward-modal').classList.add('hidden');
 });
 
-document.getElementById('modal-sell-btn').addEventListener('click', () => {
+document.getElementById('modal-sell-btn').addEventListener('click', async () => {
+  if (isServerMode()) {
+    if (server.busy) return;
+    const uids = currentUnboxedBatch.map((i) => i.uid);
+    currentUnboxedBatch = [];
+    document.getElementById('reward-modal').classList.add('hidden');
+    const res = uids.length ? await sellItemsOnServer(uids) : null;
+    if (res && Number(res.gained) > 0) sfx.coin();
+    // Se a venda falhou, os itens simplesmente continuam guardados na coleção
+    updateTopBar();
+    renderCaseSelector();
+    renderActiveCaseArena();
+    renderInventory();
+    return;
+  }
   if (currentUnboxedBatch.length) {
     const sum = currentUnboxedBatch.reduce((acc, i) => acc + i.price, 0);
     state.balance = Number((state.balance + sum).toFixed(2));
@@ -1899,17 +2017,31 @@ function toggleHeirloomUid(uid) {
     state.inventory.some((i) => i.uid === u)
   );
 
-  if (state.heirloomUids.includes(uid)) {
-    state.heirloomUids = state.heirloomUids.filter((u) => u !== uid);
-  } else {
-    const { maxHeirloomsForNextReset } = getPrestigePerks();
-    if (state.heirloomUids.length >= maxHeirloomsForNextReset) {
-      alert(
-        `Limite de Herança Permanente atingido (${maxHeirloomsForNextReset}/${maxHeirloomsForNextReset})!\n\nSuba seu Nível de Prestígio para desbloquear mais slots de Herança Permanente (até 10 slots no Prestígio X).`
-      );
-      return;
-    }
+  const { maxHeirloomsForNextReset } = getPrestigePerks();
+  const willLock = !state.heirloomUids.includes(uid);
+  if (willLock && state.heirloomUids.length >= maxHeirloomsForNextReset) {
+    alert(
+      `Limite de Herança Permanente atingido (${maxHeirloomsForNextReset}/${maxHeirloomsForNextReset})!\n\nSuba seu Nível de Prestígio para desbloquear mais slots de Herança Permanente (até 10 slots no Prestígio X).`
+    );
+    return;
+  }
+
+  if (isServerMode()) {
+    serverAction(() => window.neonBackend.setHeirloom(uid, willLock)).then((res) => {
+      if (!res) return;
+      applyServerDelta(res);
+      updateTopBar();
+      renderInventory();
+      renderTradeUp();
+      renderStats();
+    });
+    return;
+  }
+
+  if (willLock) {
     state.heirloomUids.push(uid);
+  } else {
+    state.heirloomUids = state.heirloomUids.filter((u) => u !== uid);
   }
   saveState();
   updateTopBar();
@@ -2168,6 +2300,18 @@ function sellItemByUid(uid) {
   if (isHeirloom(uid)) return;
   const idx = state.inventory.findIndex((i) => i.uid === uid);
   if (idx === -1) return;
+  if (isServerMode()) {
+    sellItemsOnServer([uid]).then((res) => {
+      if (!res) return;
+      if (Number(res.gained) > 0) sfx.coin();
+      updateTopBar();
+      renderCaseSelector();
+      renderActiveCaseArena();
+      renderInventory();
+      renderTradeUp();
+    });
+    return;
+  }
   const [removed] = state.inventory.splice(idx, 1);
   state.balance = Number((state.balance + removed.price).toFixed(2));
   state.stats.totalEarned = Number((state.stats.totalEarned + removed.price).toFixed(2));
@@ -2197,6 +2341,20 @@ document.getElementById('inv-sort-select').addEventListener('change', renderInve
 document.getElementById('sell-dupes-btn')?.addEventListener('click', () => {
   const { kept, duplicates } = getDuplicatesPartition();
   if (!duplicates.length) return;
+  if (isServerMode()) {
+    // O servidor refaz a partição (mantém a cópia mais valiosa e as Heranças) e paga o resto
+    serverAction(() => window.neonBackend.sellDuplicates()).then((res) => {
+      if (!res) return;
+      applyServerDelta(res);
+      sfx.coin();
+      updateTopBar();
+      renderCaseSelector();
+      renderActiveCaseArena();
+      renderInventory();
+      renderTradeUp();
+    });
+    return;
+  }
   const gain = duplicates.reduce((sum, i) => sum + i.price, 0);
   state.inventory = kept;
   state.balance = Number((state.balance + gain).toFixed(2));
@@ -2311,6 +2469,21 @@ document.getElementById('execute-tradeup-btn').addEventListener('click', () => {
   const currentRarity = tradeUpSelection[0].rarity;
   const nextRarity = RARITIES[currentRarity].next;
   if (!nextRarity) return;
+
+  if (isServerMode()) {
+    const uids = tradeUpSelection.map((i) => i.uid);
+    serverAction(() => window.neonBackend.executeTradeup(uids)).then((res) => {
+      if (!res) return;
+      tradeUpSelection = [];
+      const { added } = applyServerDelta(res);
+      currentUnboxedBatch = added;
+      updateTopBar();
+      renderTradeUp();
+      renderInventory();
+      if (added.length) showRewardModal(added);
+    });
+    return;
+  }
 
   const usedUids = new Set(tradeUpSelection.map((i) => i.uid));
   state.inventory = state.inventory.filter((i) => !usedUids.has(i.uid));
@@ -2510,6 +2683,18 @@ document.getElementById('prestige-btn')?.addEventListener('click', () => {
         `Sua Patente Militar voltará ao Nível 1 e as demais skins serão convertidas na sua nova Insígnia de Prestígio.`
     )
   ) {
+    if (isServerMode()) {
+      // O servidor confere os requisitos, escolhe as Heranças pela mesma regra e zera o resto
+      serverAction(() => window.neonBackend.prestigeUp()).then((res) => {
+        if (!res) return;
+        applyServerInventory(res.inventory);
+        applyServerProfile(res.profile, { silent: true });
+        sfx.unboxReveal('gold');
+        refreshAllViews();
+        fetchGlobalLeaderboard();
+      });
+      return;
+    }
     state.prestigeLevel = nt.level;
     state.xp = 0;
     state.balance = nextPerks.startingBalance;
@@ -2598,6 +2783,7 @@ function buildMyLeaderboardEntry() {
     bestDropValue: state.stats.bestDropValue || 0,
     goldsUnboxed: state.stats.goldsUnboxed || 0,
     casesOpened: state.stats.casesOpened || 0,
+    isVip: isServerMode() && server.isVip,
     updatedAt: Date.now(),
   };
 }
@@ -2647,6 +2833,7 @@ function mergeLeaderboardEntry(entry) {
       bestDropValue: Number(entry.bestDropValue) || 0,
       goldsUnboxed: Number(entry.goldsUnboxed) || 0,
       casesOpened: Number(entry.casesOpened) || 0,
+      isVip: entry.isVip === true,
       updatedAt: Number(entry.updatedAt) || Date.now(),
     };
   }
@@ -2708,6 +2895,12 @@ async function publishMyScoreToCloud(force = false) {
   const myEntry = buildMyLeaderboardEntry();
   mergeLeaderboardEntry(myEntry);
   saveLeaderboardCache();
+
+  // Modo servidor: o placar é uma view das tabelas oficiais, não há nada para "publicar"
+  if (isServerMode()) {
+    renderLeaderboard();
+    return;
+  }
 
   // Only auto-publish if player has set a Callsign or opened at least 1 case, and throttle unless forced
   if (!force && now - lastCloudPublishAt < 25000) return;
@@ -2865,7 +3058,7 @@ function renderLeaderboard() {
           <span class="lb-podium-medal">${medals[idx]}</span>
           <div class="lb-podium-emblem">${getPrestigeEmblemSVG(p.prestigeLevel, p.milLevel)}</div>
           <strong style="font-size: 16px; color: var(--ink);">
-            ${escapeHTML(p.callsign)} ${isMe ? '<span class="pill-badge" style="margin-left:4px;">VOCÊ</span>' : ''}
+            ${escapeHTML(p.callsign)} ${p.isVip ? '<span class="pill-badge vip-badge" title="Operador VIP">VIP</span>' : ''} ${isMe ? '<span class="pill-badge" style="margin-left:4px;">VOCÊ</span>' : ''}
           </strong>
           <span style="font-size: 12px; color: var(--secondary); font-weight: 800;">
             ${formatRankLabelForEntry(p)}
@@ -2893,6 +3086,7 @@ function renderLeaderboard() {
               <div class="lb-mini-emblem">${getPrestigeEmblemSVG(p.prestigeLevel, p.milLevel)}</div>
               <div>
                 <strong>${escapeHTML(p.callsign)}</strong>
+                ${p.isVip ? '<span class="pill-badge vip-badge" title="Operador VIP" style="margin-left:6px;">VIP</span>' : ''}
                 ${isMe ? '<span class="pill-badge" style="margin-left:6px;">VOCÊ</span>' : ''}
                 <div style="font-size: 11px; color: var(--muted);">${p.casesOpened} caixas • ${p.goldsUnboxed} ★ Apex</div>
               </div>
@@ -2920,6 +3114,10 @@ function renderLeaderboard() {
 let manualSyncCooldownUntil = 0;
 
 document.getElementById('lb-sync-btn')?.addEventListener('click', async () => {
+  if (isServerMode()) {
+    await registerCallsignOnServer();
+    return;
+  }
   const now = Date.now();
   if (now < manualSyncCooldownUntil) {
     const rem = Math.ceil((manualSyncCooldownUntil - now) / 1000);
@@ -2994,6 +3192,9 @@ const AIM_RARITY_MULTS = {
 let aimStreak = 0;
 let aimSessionHits = 0;
 let aimSessionShots = 0;
+let aimSessionCrits = 0;
+let gridshotSessionId = null; // sessão aberta no servidor (modo servidor)
+let gridshotStarting = false;
 let gridshotActive = false;
 let gridshotScore = 0;
 let gridshotTimeLeft = 30;
@@ -3282,6 +3483,9 @@ function handleAimTargetHit(targetEl, x, y, isCrit) {
   aimStreak++;
   aimSessionHits++;
   aimSessionShots++;
+  if (isCrit) aimSessionCrits++;
+  // No modo servidor, XP / alvos / kills abaixo são só a prévia na tela: o que vale é o
+  // que submit_gridshot_rpc creditar no fim da rodada.
   state.stats.targetsHit = (state.stats.targetsHit || 0) + 1;
 
   const xpGain = isCrit ? 4 : 2;
@@ -3361,11 +3565,20 @@ function updateCooldownButtonsUI() {
   }
 }
 
-function startGridshotChallenge() {
-  if (gridshotActive) return;
+async function startGridshotChallenge() {
+  if (gridshotActive || gridshotStarting) return;
   if (Date.now() < gridshotCooldownUntil) return;
 
-  window.neonBackend?.startGridshotSession().catch(() => {});
+  if (isServerMode()) {
+    // O relógio da rodada é o do servidor: a sessão precisa existir lá antes do primeiro alvo
+    gridshotStarting = true;
+    const sessionId = await serverAction(() => window.neonBackend.startGridshot());
+    gridshotStarting = false;
+    if (!sessionId) return;
+    gridshotSessionId = sessionId;
+  } else {
+    window.neonBackend?.startGridshotSession().catch(() => {});
+  }
 
   gridshotActive = true;
   gridshotScore = 0;
@@ -3373,6 +3586,7 @@ function startGridshotChallenge() {
   aimStreak = 0;
   aimSessionHits = 0;
   aimSessionShots = 0;
+  aimSessionCrits = 0;
 
   const startBtn = document.getElementById('aimlab-start-gridshot-btn');
   if (startBtn) startBtn.disabled = true;
@@ -3408,6 +3622,11 @@ function endGridshotChallenge() {
   const layer = document.getElementById('aimlab-targets-layer');
   if (layer) layer.innerHTML = '';
 
+  if (isServerMode()) {
+    finishGridshotOnServer();
+    return;
+  }
+
   const isNewRecord = gridshotScore > (state.stats.bestGridshotScore || 0);
   if (isNewRecord) {
     state.stats.bestGridshotScore = gridshotScore;
@@ -3440,22 +3659,85 @@ function endGridshotChallenge() {
     .catch(() => {});
 
   const accPct = aimSessionShots > 0 ? Math.round((aimSessionHits / aimSessionShots) * 100) : 100;
+  showGridshotBanner(
+    isNewRecord
+      ? `🏆 NOVO RECORDE (RANK ${rank}): ${gridshotScore.toLocaleString('en-US')} PTS!`
+      : `⚡ FIM DO GRIDSHOT (RANK ${rank}): ${gridshotScore.toLocaleString('en-US')} PTS`,
+    `Alvos Abatidos: ${aimSessionHits} • Precisão: ${accPct}% • Pagamento da Rodada: +${formatMoney(reward)} (Sincronizado no Ranking Global!)`
+  );
+}
+
+function showGridshotBanner(title, desc) {
   const banner = document.getElementById('aimlab-banner-overlay');
   const titleEl = document.getElementById('aimlab-banner-title');
   const descEl = document.getElementById('aimlab-banner-desc');
-
-  if (titleEl) {
-    titleEl.textContent = isNewRecord
-      ? `🏆 NOVO RECORDE (RANK ${rank}): ${gridshotScore.toLocaleString('en-US')} PTS!`
-      : `⚡ FIM DO GRIDSHOT (RANK ${rank}): ${gridshotScore.toLocaleString('en-US')} PTS`;
-  }
-  if (descEl) {
-    descEl.textContent = `Alvos Abatidos: ${aimSessionHits} • Precisão: ${accPct}% • Pagamento da Rodada: +${formatMoney(reward)} (Sincronizado no Ranking Global!)`;
-  }
+  if (titleEl) titleEl.textContent = title;
+  if (descEl) descEl.textContent = desc;
   if (banner) {
     banner.classList.remove('hidden');
     banner.style.display = 'flex';
   }
+}
+
+// Modo servidor: a recompensa, o XP e o recorde só existem se submit_gridshot_rpc aceitar
+// a rodada (janela de 28–40s medida no relógio do servidor + coerência de acertos/pontos).
+async function finishGridshotOnServer() {
+  const score = gridshotScore;
+  const hits = aimSessionHits;
+  const shots = aimSessionShots;
+  const crits = aimSessionCrits;
+  const sessionId = gridshotSessionId;
+  gridshotSessionId = null;
+  const { rank } = getGridshotRankAndReward(score);
+  const prevBest = state.stats.bestGridshotScore || 0;
+  const accPct = shots > 0 ? Math.round((hits / shots) * 100) : 100;
+  const equippedUid = getEquippedWeaponItem()?.uid || null;
+
+  gridshotCooldownUntil = Date.now() + 15000;
+  if (gridshotCooldownIntervalId) clearInterval(gridshotCooldownIntervalId);
+  gridshotCooldownIntervalId = setInterval(updateCooldownButtonsUI, 500);
+  updateCooldownButtonsUI();
+  showGridshotBanner('⏳ VALIDANDO RODADA NO SERVIDOR…', `Pontuação: ${score.toLocaleString('en-US')} pts • Alvos Abatidos: ${hits}`);
+
+  let failure = null;
+  const res = await serverAction(
+    () => window.neonBackend.submitGridshot({ sessionId, score, hits, shots, crits, equippedUid }),
+    {
+      wait: true,
+      onError: (err) => {
+        failure = err;
+      },
+    }
+  );
+
+  if (res && res.ok) {
+    applyServerDelta(res);
+    const reward = Number(res.reward) || 0;
+    if (reward > 0) sfx.coin();
+    const isNewRecord = score > prevBest && Number(res.best_gridshot_score) >= score;
+    showGridshotBanner(
+      isNewRecord
+        ? `🏆 NOVO RECORDE (RANK ${rank}): ${score.toLocaleString('en-US')} PTS!`
+        : `⚡ FIM DO GRIDSHOT (RANK ${rank}): ${score.toLocaleString('en-US')} PTS`,
+      `Alvos Abatidos: ${hits} • Precisão: ${accPct}% • Pagamento da Rodada: +${formatMoney(reward)} (validado pelo servidor)`
+    );
+  } else {
+    const reason = res
+      ? res.error === 'INVALID_SESSION_TIME'
+        ? 'o servidor mediu uma rodada fora da janela de 30 segundos'
+        : 'a pontuação não bate com os acertos registrados'
+      : failure?.code === 'NETWORK'
+        ? 'sem conexão com o servidor no fim da rodada'
+        : failure?.userMessage || 'o servidor recusou a rodada';
+    showGridshotBanner('⚠️ RODADA NÃO VALIDADA', `Nenhuma recompensa foi paga: ${reason}.`);
+    // Desfaz a prévia de XP / alvos / kills mostrada durante a rodada
+    resyncServerState();
+  }
+
+  updateTopBar();
+  updateAimLabHUD();
+  renderAimLabLoadout();
+  if (document.getElementById('tab-leaderboard')?.classList.contains('active')) renderLeaderboard();
 }
 
 document.getElementById('aimlab-weapon-select')?.addEventListener('change', (e) => {
@@ -3479,9 +3761,486 @@ document.querySelectorAll('.multi-btn').forEach((btn) => {
   });
 });
 
+// =====================================================
+// SERVER-AUTHORITATIVE ENGINE
+// =====================================================
+let TEMPLATE_INDEX = null;
+
+function getTemplateIndex() {
+  if (!TEMPLATE_INDEX) {
+    TEMPLATE_INDEX = new Map();
+    ALL_CASES.forEach((c) => c.items.forEach((it) => TEMPLATE_INDEX.set(it.id, it)));
+  }
+  return TEMPLATE_INDEX;
+}
+
+// O servidor guarda só o que é dele (dono, template, float, SyncTrack, preço); nome, forma e
+// cores vêm do catálogo local, que é o mesmo que gerou o catálogo do banco.
+function itemFromServer(row) {
+  const tpl = getTemplateIndex().get(row.template_id) || {
+    ...ALL_CASES[0].items[0],
+    id: row.template_id,
+    name: String(row.template_id),
+  };
+  const floatVal = Number(row.float);
+  const wear = getWearFromFloat(floatVal);
+  return {
+    uid: row.uid,
+    templateId: tpl.id,
+    name: tpl.name,
+    rarity: tpl.rarity,
+    shape: tpl.shape,
+    c1: tpl.c1,
+    c2: tpl.c2,
+    pattern: tpl.pattern,
+    float: floatVal,
+    wearName: wear.name,
+    wearShort: row.wear_short || wear.short,
+    statTrak: Boolean(row.stat_trak),
+    kills: Number(row.kills) || 0,
+    price: Number(row.price) || 0,
+    caseId: row.case_id,
+    obtainedAt: Number(row.obtained_at_ms) || Date.now(),
+  };
+}
+
+function getProjectedServerBalance() {
+  const elapsedSec = Math.min(server.capSec, Math.max(0, (performance.now() - server.balanceAt) / 1000));
+  return Number((server.balanceBase + server.rate * elapsedSec).toFixed(2));
+}
+
+function applyServerProfile(p, { silent = false } = {}) {
+  if (!p) return;
+  const prevPrestige = state.prestigeLevel || 0;
+  const prevLevel = getMilitaryLevelInfo().level;
+
+  state.playerId = p.player_id || state.playerId;
+  state.callsignLocked = Boolean(p.callsign_locked && p.callsign);
+  state.callsign = state.callsignLocked ? String(p.callsign) : '';
+  state.prestigeLevel = Number(p.prestige_level) || 0;
+  state.xp = Number(p.xp) || 0;
+  state.stats = {
+    ...state.stats,
+    casesOpened: Number(p.cases_opened) || 0,
+    totalSpent: Number(p.total_spent) || 0,
+    totalEarned: Number(p.total_earned) || 0,
+    goldsUnboxed: Number(p.golds_unboxed) || 0,
+    bestDropValue: Number(p.best_drop_value) || 0,
+    tradeUpsDone: Number(p.tradeups_done) || 0,
+    targetsHit: Number(p.targets_hit) || 0,
+    bestGridshotScore: Number(p.best_gridshot_score) || 0,
+  };
+
+  server.balanceBase = Number(p.balance) || 0;
+  server.balanceAt = performance.now();
+  server.rate = Number(p.passive_rate_per_sec) || 0;
+  server.capSec = Number(p.offline_cap_sec) || 12 * 3600;
+  server.isVip = Boolean(p.is_vip);
+  server.lastSyncAt = Date.now();
+  state.balance = server.balanceBase;
+
+  if (!silent && state.prestigeLevel === prevPrestige && getMilitaryLevelInfo().level > prevLevel) {
+    sfx.coin();
+  }
+}
+
+function applyServerInventory(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  state.inventory = list.map(itemFromServer);
+  state.heirloomUids = list.filter((r) => r.is_heirloom).map((r) => r.uid);
+  const owned = new Set(state.inventory.map((i) => i.uid));
+  tradeUpSelection = tradeUpSelection
+    .map((sel) => state.inventory.find((i) => i.uid === sel.uid))
+    .filter(Boolean);
+  if (state.equippedUid && !owned.has(state.equippedUid)) state.equippedUid = null;
+}
+
+// Aplica a resposta de uma ação: { removed: [uid], items: [novos], updated: [alterados], profile }
+function applyServerDelta(res) {
+  const added = [];
+  if (!res) return { added };
+
+  if (Array.isArray(res.removed) && res.removed.length) {
+    const gone = new Set(res.removed);
+    state.inventory = state.inventory.filter((i) => !gone.has(i.uid));
+    state.heirloomUids = state.heirloomUids.filter((u) => !gone.has(u));
+    tradeUpSelection = tradeUpSelection.filter((i) => !gone.has(i.uid));
+    if (gone.has(state.equippedUid)) state.equippedUid = null;
+  }
+
+  const upsert = (row, bucket) => {
+    const fresh = itemFromServer(row);
+    const existing = state.inventory.find((i) => i.uid === fresh.uid);
+    if (existing) {
+      Object.assign(existing, fresh);
+    } else {
+      state.inventory.push(fresh);
+      if (bucket) bucket.push(fresh);
+    }
+    state.heirloomUids = state.heirloomUids.filter((u) => u !== fresh.uid);
+    if (row.is_heirloom) state.heirloomUids.push(fresh.uid);
+  };
+  (Array.isArray(res.items) ? res.items : []).forEach((row) => upsert(row, added));
+  (Array.isArray(res.updated) ? res.updated : []).forEach((row) => upsert(row, null));
+
+  applyServerProfile(res.profile);
+  return { added };
+}
+
+function refreshAllViews() {
+  lastRenderedRankKey = '';
+  const hint = document.getElementById('tradeup-origin-hint');
+  if (hint) {
+    hint.textContent = isServerMode()
+      ? ' O item forjado vem da caixa de um dos 5 itens usados, sorteada pelo servidor.'
+      : '';
+  }
+  populateCatalogDropdown();
+  updateTopBar();
+  renderCaseSelector();
+  if (!isSpinning) renderActiveCaseArena();
+  renderInventory();
+  renderTradeUp();
+  renderStats();
+  renderAimLabLoadout();
+  renderLeaderboard();
+}
+
+// ---------- Avisos não bloqueantes ----------
+let toastTimerId = null;
+
+function showToast(message, kind = 'info') {
+  let el = document.getElementById('nd-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'nd-toast';
+    el.setAttribute('role', 'status');
+    document.body.appendChild(el);
+  }
+  el.className = `nd-toast ${kind}`;
+  el.textContent = message;
+  // força o reflow para a transição rodar mesmo em avisos seguidos
+  void el.offsetWidth;
+  el.classList.add('visible');
+  if (toastTimerId) clearTimeout(toastTimerId);
+  toastTimerId = setTimeout(() => el.classList.remove('visible'), 5200);
+}
+
+// ---------- Tela de conexão ----------
+function showServerOverlay(title, desc = '', onRetry = null) {
+  let el = document.getElementById('server-overlay');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'server-overlay';
+    el.className = 'modal-backdrop server-overlay';
+    el.innerHTML = `
+      <div class="modal-card" style="max-width: 440px;">
+        <div class="modal-glow" style="background: var(--secondary);"></div>
+        <h3 class="modal-header-title" id="server-overlay-title"></h3>
+        <p id="server-overlay-desc" style="color: var(--muted); font-size: 14px; margin-bottom: 16px;"></p>
+        <div class="modal-buttons">
+          <button id="server-overlay-retry" class="btn-open">🔄 Tentar novamente</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(el);
+  }
+  el.classList.remove('hidden');
+  document.getElementById('server-overlay-title').textContent = title;
+  document.getElementById('server-overlay-desc').textContent = desc;
+  const retryBtn = document.getElementById('server-overlay-retry');
+  retryBtn.style.display = onRetry ? '' : 'none';
+  retryBtn.onclick = onRetry;
+}
+
+function hideServerOverlay() {
+  document.getElementById('server-overlay')?.classList.add('hidden');
+}
+
+// ---------- Chamadas ao servidor ----------
+// Recusas de regra indicam que a tela pode estar atrás do servidor (outra aba, outro aparelho)
+const SERVER_RESYNC_CODES = new Set([
+  'NETWORK',
+  'ITEM_NOT_FOUND',
+  'TRADEUP_INVALID',
+  'INSUFFICIENT_BALANCE',
+  'HEIRLOOM_LIMIT',
+  'PRESTIGE_REQUIREMENTS',
+  'PRESTIGE_MAX',
+  'GRIDSHOT_INVALID_SESSION',
+  'CALLSIGN_LOCKED',
+  'SERVER_ERROR',
+]);
+
+function reportServerError(err) {
+  const code = err?.code || 'SERVER_ERROR';
+  if (code === 'NETWORK') {
+    showToast('📡 Sem resposta do servidor. Confira a conexão e tente de novo.', 'error');
+  } else if (code === 'AUTH_UNAVAILABLE' || code === 'AUTH_REJECTED' || code === 'AUTH_REQUIRED') {
+    showToast('🔐 Sua sessão com o servidor expirou. Recarregue a página.', 'error');
+  } else if (code === 'RPC_MISSING') {
+    showToast('⚠️ O servidor está em manutenção. Recarregue a página em instantes.', 'error');
+  } else {
+    showToast(`⚠️ ${err?.userMessage || 'O servidor recusou a ação.'}`, 'error');
+  }
+  // Sem resposta não dá para saber se a ação valeu: busca o estado oficial assim que der
+  if (SERVER_RESYNC_CODES.has(code)) setTimeout(() => resyncServerState(), 0);
+}
+
+// Uma ação por vez: as respostas trazem deltas, então precisam ser aplicadas na ordem.
+// Sem `wait`, um clique durante outra ação é ignorado; com `wait`, entra na fila.
+async function serverAction(run, { wait = false, onError = null } = {}) {
+  if (!isServerMode()) return null;
+  if (server.busy && !wait) return null;
+  const previous = server.queue;
+  let release;
+  server.queue = new Promise((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  server.busy = true;
+  document.body.classList.add('server-busy');
+  try {
+    return await run();
+  } catch (err) {
+    if (onError) onError(err);
+    else reportServerError(err);
+    return null;
+  } finally {
+    server.busy = false;
+    document.body.classList.remove('server-busy');
+    release();
+  }
+}
+
+// Vende itens pelo servidor. Ele só devolve em `removed` o que de fato vendeu: se faltou algum
+// (já vendido em outra aba/aparelho, ou travado como Herança), a tela estava desatualizada.
+async function sellItemsOnServer(uids) {
+  const res = await serverAction(() => window.neonBackend.sellItems(uids));
+  if (!res) return null;
+  applyServerDelta(res);
+  if ((res.removed || []).length < uids.length) {
+    showToast('⚠️ Parte dos itens já não estava mais no seu inventário. Coleção atualizada.', 'error');
+    setTimeout(() => resyncServerState(), 0);
+  }
+  return res;
+}
+
+// Recarrega o estado oficial (inventário inteiro). Não roda no meio de uma roleta, de uma
+// rodada de Gridshot ou com o modal de recompensa aberto, para não revelar/embaralhar nada.
+async function resyncServerState() {
+  if (!isServerMode() || server.busy) return false;
+  if (isSpinning || gridshotActive || gridshotStarting || currentUnboxedBatch.length) return false;
+  const st = await serverAction(() => window.neonBackend.getMyState(), { onError: () => {} });
+  if (!st) return false;
+  applyServerInventory(st.inventory);
+  applyServerProfile(st.profile, { silent: true });
+  refreshAllViews();
+  return true;
+}
+
+function maybeResyncOnReturn() {
+  if (!isServerMode() || document.hidden) return;
+  if (Date.now() - server.lastSyncAt > 45000) resyncServerState();
+}
+document.addEventListener('visibilitychange', maybeResyncOnReturn);
+window.addEventListener('online', () => resyncServerState());
+
+// ---------- Callsign ----------
+async function registerCallsignOnServer() {
+  const statusEl = document.getElementById('lb-sync-status');
+  if (state.callsignLocked) {
+    // Nada a publicar: o placar lê as tabelas oficiais. O botão só recarrega os dois lados.
+    await resyncServerState();
+    await fetchGlobalLeaderboard();
+    return;
+  }
+
+  const input = document.getElementById('lb-callsign-input');
+  const candidate = (input?.value || '').trim().slice(0, 18);
+  if (candidate.length < 3) {
+    alert('⚠️ Digite um Callsign com pelo menos 3 caracteres para registrar no placar.');
+    return;
+  }
+  if (candidate.toLowerCase().startsWith('operador-')) {
+    alert('⚠️ Escolha um Callsign personalizado (não pode começar com "Operador-").');
+    return;
+  }
+  if (
+    !confirm(
+      `🔒 Confirmar registro permanente do Callsign "${candidate}"?\n\nUma vez registrado, seu Callsign fica vinculado à sua conta e não poderá ser trocado.`
+    )
+  ) {
+    return;
+  }
+
+  const res = await serverAction(() => window.neonBackend.registerCallsign(candidate), {
+    onError: (err) => {
+      if (err?.code === 'CALLSIGN_TAKEN') {
+        alert(`⚠️ O Callsign "${candidate}" já está em uso por outro operador! Escolha um nome único.`);
+      } else {
+        reportServerError(err);
+      }
+    },
+  });
+  if (!res) {
+    renderLeaderboard();
+    return;
+  }
+  applyServerProfile(res.profile, { silent: true });
+  sfx.coin();
+  if (statusEl) statusEl.textContent = `🟢 Callsign "${state.callsign}" registrado no servidor`;
+  renderLeaderboard();
+  fetchGlobalLeaderboard();
+}
+
+// ---------- Migração única do save antigo (localStorage) ----------
+function buildLegacyImportPayload(legacy) {
+  const heirlooms = new Set(Array.isArray(legacy.heirloomUids) ? legacy.heirloomUids : []);
+  const index = getTemplateIndex();
+  const inventory = (Array.isArray(legacy.inventory) ? legacy.inventory : [])
+    .filter((i) => i && index.has(i.templateId))
+    .sort((a, b) => (b.price || 0) - (a.price || 0))
+    .slice(0, 3000)
+    .map((i) => ({
+      template_id: i.templateId,
+      float: Number(i.float) || 0.22,
+      stat_trak: Boolean(i.statTrak),
+      kills: Math.max(0, Math.floor(Number(i.kills) || 0)),
+      is_heirloom: heirlooms.has(i.uid),
+    }));
+  const stats = legacy.stats || {};
+  return {
+    balance: Number(legacy.balance) || 0,
+    prestige_level: Number(legacy.prestigeLevel) || 0,
+    xp: Math.floor(Number(legacy.xp) || 0),
+    cases_opened: Number(stats.casesOpened) || 0,
+    golds_unboxed: Number(stats.goldsUnboxed) || 0,
+    tradeups_done: Number(stats.tradeUpsDone) || 0,
+    targets_hit: Number(stats.targetsHit) || 0,
+    total_spent: Number(stats.totalSpent) || 0,
+    total_earned: Number(stats.totalEarned) || 0,
+    inventory,
+  };
+}
+
+// `state` ainda é o save local neste ponto. Só importa para uma conta de servidor zerada,
+// uma única vez, e enquanto o servidor mantiver a janela de importação aberta.
+async function maybeImportLegacySave(st) {
+  const legacy = state;
+  const hasLocalProgress =
+    readStorage('neondrop_save_v3') !== null &&
+    ((legacy.inventory || []).length > 0 || (legacy.stats?.casesOpened || 0) > 0 || (legacy.prestigeLevel || 0) > 0);
+  const serverIsFresh = (st.inventory || []).length === 0 && (Number(st.profile?.cases_opened) || 0) === 0;
+  if (!st.legacy_import_open || !hasLocalProgress || !serverIsFresh || readStorage(LEGACY_IMPORT_FLAG_KEY)) {
+    return st;
+  }
+
+  let imported;
+  try {
+    imported = await window.neonBackend.importLegacySave(buildLegacyImportPayload(legacy));
+  } catch (err) {
+    if (String(err?.code || '').startsWith('IMPORT_')) {
+      // O servidor decidiu que não cabe importação: não insiste nos próximos acessos
+      writeStorage(LEGACY_IMPORT_FLAG_KEY, '1');
+      return st;
+    }
+    throw err;
+  }
+  writeStorage(LEGACY_IMPORT_FLAG_KEY, '1');
+
+  // Leva junto o Callsign que já estava travado no save antigo (se ainda estiver livre)
+  if (legacy.callsignLocked && legacy.callsign && !imported.profile?.callsign_locked) {
+    try {
+      const res = await window.neonBackend.registerCallsign(String(legacy.callsign).trim().slice(0, 18));
+      if (res?.profile) imported.profile = res.profile;
+    } catch (err) {
+      // nome já tomado ou inválido: o jogador registra outro pelo placar
+    }
+  }
+  setTimeout(() => showToast('✅ Progresso deste navegador migrado para a sua conta no servidor.', 'success'), 400);
+  return { ...st, profile: imported.profile, inventory: imported.inventory, offline: null };
+}
+
+// ---------- Boot ----------
+async function bootServerMode() {
+  showServerOverlay('📡 CONECTANDO AO SERVIDOR…', 'Carregando o progresso oficial da sua conta.');
+  const delays = [900, 2200];
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      let st = await window.neonBackend.getMyState();
+      // A partir daqui este navegador sabe que o servidor é a autoridade: nunca mais cai no modo local
+      writeStorage(SERVER_MODE_FLAG_KEY, '1');
+      st = await maybeImportLegacySave(st);
+      enterAuthoritativeMode(st);
+      return;
+    } catch (err) {
+      lastError = err;
+      if (err?.code !== 'NETWORK' || attempt === delays.length) break;
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+    }
+  }
+
+  if (readStorage(SERVER_MODE_FLAG_KEY) === '1') {
+    const offline = lastError?.code === 'NETWORK';
+    showServerOverlay(
+      offline ? '📡 SEM CONEXÃO COM O SERVIDOR' : '⚠️ SERVIDOR INDISPONÍVEL',
+      offline
+        ? 'Seu progresso fica guardado no servidor. Confira sua internet e tente de novo.'
+        : 'Não foi possível abrir a sua conta de jogo agora. Tente novamente em instantes.',
+      bootServerMode
+    );
+    return;
+  }
+
+  // Banco ainda sem o schema novo (ou login anônimo desligado): segue no modo local de antes
+  server.mode = 'legacy';
+  hideServerOverlay();
+  if (lastError?.code === 'NETWORK') {
+    showToast('📡 Servidor fora de alcance: jogando em modo local neste acesso.', 'error');
+  }
+  checkOfflineEarnings();
+  fetchGlobalLeaderboard();
+}
+
+function enterAuthoritativeMode(st) {
+  let prefs = {};
+  try {
+    prefs = JSON.parse(readStorage(SERVER_PREFS_KEY) || '{}') || {};
+  } catch (e) {
+    prefs = {};
+  }
+
+  server.mode = 'authoritative';
+  state = structuredClone(defaultState);
+  state.equippedUid = typeof prefs.equippedUid === 'string' ? prefs.equippedUid : null;
+  tradeUpSelection = [];
+  currentUnboxedBatch = [];
+  applyServerInventory(st.inventory);
+  applyServerProfile(st.profile, { silent: true });
+  refreshAllViews();
+  hideServerOverlay();
+
+  const offline = st.offline;
+  if (offline && Number(offline.elapsed_sec) >= 60 && Number(offline.earned) > 0 && state.inventory.length > 0) {
+    showOfflineEarningsModal(Number(offline.elapsed_sec), Number(offline.earned), Math.round(server.capSec / 3600));
+  }
+  fetchGlobalLeaderboard();
+}
+
 // Idle Passive Income Loop (runs every 250ms = 4 ticks/sec)
 let idleTickCounter = 0;
 setInterval(() => {
+  if (server.mode === 'booting') return;
+  if (isServerMode()) {
+    // Só projeção visual: o saldo oficial é recalculado no servidor a cada ação (lazy timestamp)
+    state.balance = getProjectedServerBalance();
+    updateTopBar();
+    return;
+  }
+
   const { ratePerSec } = computePassiveIncome();
   if (ratePerSec > 0) {
     state.balance = Number((state.balance + ratePerSec * 0.25).toFixed(2));
@@ -3504,6 +4263,22 @@ document.getElementById('sound-toggle').addEventListener('click', (e) => {
 document.getElementById('open-case-btn').addEventListener('click', spinRoulette);
 
 document.getElementById('reset-save-btn').addEventListener('click', () => {
+  if (isServerMode()) {
+    if (
+      !confirm(
+        'Tem certeza que deseja resetar todo o seu saldo e inventário?\n\nIsso apaga o progresso da sua conta no servidor (o Callsign registrado é mantido) e não pode ser desfeito.'
+      )
+    ) {
+      return;
+    }
+    serverAction(() => window.neonBackend.resetProgress()).then((res) => {
+      if (!res) return;
+      applyServerInventory(res.inventory);
+      applyServerProfile(res.profile, { silent: true });
+      refreshAllViews();
+    });
+    return;
+  }
   if (confirm('Tem certeza que deseja resetar todo o seu saldo e inventário?')) {
     state = structuredClone(defaultState);
     tradeUpSelection = [];
@@ -3549,6 +4324,11 @@ renderCaseSelector();
 renderActiveCaseArena();
 renderInventory();
 renderAimLabLoadout();
-checkOfflineEarnings();
-fetchGlobalLeaderboard();
+if (server.mode === 'booting') {
+  // Descobre se o servidor já é a autoridade da economia (e carrega o estado oficial)
+  bootServerMode();
+} else {
+  checkOfflineEarnings();
+  fetchGlobalLeaderboard();
+}
 initLeaderboardLiveStream();

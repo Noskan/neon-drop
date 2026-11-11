@@ -1,0 +1,15 @@
+{
+  "name": "neon-drop-tests",
+  "private": true,
+  "type": "module",
+  "description": "Testes locais do NEON DROP: economia server-authoritative (PGlite) e jogo ponta a ponta (Playwright). Não tocam no Supabase de produção.",
+  "scripts": {
+    "test:sql": "node economy.test.mjs",
+    "test:e2e": "node e2e.test.mjs",
+    "test": "node economy.test.mjs && node e2e.test.mjs"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16",
+    "playwright": "^1.65.0"
+  }
+}

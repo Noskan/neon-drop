@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=20261111_10" />
+  <link rel="stylesheet" href="style.css?v=20261111_11" />
 </head>
 <body>
   <!-- Sticky Top Nav (1win Design Language) -->
@@ -223,7 +223,7 @@
         <div class="tradeup-panel">
           <div class="tradeup-info">
             <h2>⚗️ Contrato de Troca (Trade-Up)</h2>
-            <p>Escolha <strong>5 skins da mesma raridade</strong> do seu inventário para forjar <strong>1 item garantido da raridade superior</strong>!</p>
+            <p>Escolha <strong>5 skins da mesma raridade</strong> do seu inventário para forjar <strong>1 item garantido da raridade superior</strong>!<span id="tradeup-origin-hint"></span></p>
           </div>
           <div class="tradeup-slots" id="tradeup-slots"></div>
           <div class="tradeup-actions">
@@ -434,7 +434,7 @@
       <div class="modal-glow" style="background: #00b24b;"></div>
       <h3 class="modal-header-title">⏱️ BEM-VINDO DE VOLTA!</h3>
       <p style="color: var(--text-muted); font-size: 14px; margin-bottom: 16px;">
-        Suas skins únicas continuaram gerando renda passiva enquanto você esteve ausente (<span id="offline-time-text">0m</span>, limite de 12h):
+        Suas skins únicas continuaram gerando renda passiva enquanto você esteve ausente (<span id="offline-time-text">0m</span>, limite de <span id="offline-cap-text">12h</span>):
       </p>
       <div class="reward-total-bar" style="margin: 18px 0;">
         <strong id="offline-earned-price" style="font-size: 33px;">+$0.00</strong>
@@ -445,7 +445,7 @@
     </div>
   </div>
 
-  <script src="backend-adapter.js?v=20261111_10"></script>
-  <script src="app.js?v=20261111_10"></script>
+  <script src="backend-adapter.js?v=20261111_11"></script>
+  <script src="app.js?v=20261111_11"></script>
 </body>
 </html>

@@ -93,3 +93,44 @@ Como a mira 2D roda a 60fps no cliente para ter latência zero no mouse, protege
 1. O jogador clica em comprar **VIP / Passe de Batalha** -> Uma Supabase Edge Function cria o Checkout no **Stripe** ou **Mercado Pago / AbacatePay (Pix QR Code)** passando `metadata: { user_id: auth.uid(), product_id: 'vip_30d' }`.
 2. Quando o Pix ou Cartão é pago, o gateway envia um POST para a Edge Function de Webhook.
 3. A Edge Function valida a assinatura criptográfica (`Stripe-Signature` / `HMAC-SHA256`), insere o `external_tx_id` na tabela `payment_ledger` (garantindo que o mesmo pagamento nunca seja creditado duas vezes) e ativa o benefício na tabela `profiles`.
+
+---
+
+## 6. Status da Implementação (11/11/2026)
+
+### O que já está no código
+
+| Item do blueprint | Onde está | Situação |
+| --- | --- | --- |
+| §2 Economia no servidor: `open_case_rpc`, `execute_tradeup_rpc`, `prestige_up_rpc`, `register_unique_callsign_rpc`, `sync_lazy_idle_income`, mais `get_my_state_rpc`, `sell_items_rpc`, `sell_duplicates_rpc`, `set_heirloom_rpc`, `reset_progress_rpc` | `supabase/schema.sql` | Implementado. Sorteio (raridade, skin, float, SyncTrack), preço, XP, saldo e estatísticas são calculados só no PostgreSQL. |
+| §2 RLS + `leaderboard_global_view` | `supabase/schema.sql` | Implementado. O cliente lê só o próprio perfil/inventário; nenhuma tabela aceita escrita; a view é somente leitura e não expõe saldo. |
+| §3 Renda passiva por lazy timestamp (teto 12h, VIP 24h) | `sync_lazy_idle_income` | Implementado. O navegador só projeta o saldo na tela entre uma ação e outra. |
+| §4 Anti-cheat do Gridshot | `start_gridshot_rpc` / `submit_gridshot_rpc` | Implementado. A recompensa, o XP e o recorde só existem se o servidor aceitar a rodada. |
+| §5 `signInAnonymously` no 1º acesso | `backend-adapter.js` | Implementado (conta anônima via REST, sessão renovada automaticamente). |
+| §1 VIP: +25% XP, offline 24h, selo no ranking | `schema.sql` + `app.js` | Efeitos implementados. A ativação é por `grant_vip_days_admin` (só `service_role`). |
+| §5 Webhook de pagamento | `supabase/functions/payment-webhook` | Modelo genérico (HMAC) pronto, **não publicado**: depende da escolha do gateway. |
+
+O cliente (`app.js`) funciona em dois modos. Se `get_my_state_rpc` responde, o servidor é a autoridade e o navegador só pede ações e desenha a resposta. Se o banco ainda não tem o schema novo (ou o login anônimo está desligado), o jogo segue no modo local antigo, sem enviar nada ao ranking. Depois que um navegador jogou no modo servidor, ele não volta mais para o modo local: sem conexão, mostra uma tela de "tentar novamente".
+
+### Decisões que diferem do texto original
+
+- **Contrato de Troca:** o item forjado sai da caixa de um dos 5 itens usados (sorteada entre eles), não da "caixa ativa" na tela. Do contrário, 5 itens baratos virariam um item da caixa mais cara.
+- **Cooldown do Gridshot:** 12s no servidor e 15s no cliente, para a latência não transformar um clique legítimo em erro.
+- **Teto de pontuação:** `score <= ((hits - crits) * 100 + crits * 150) * 2.0`, com `crits` enviado pelo cliente e limitado a `hits`. É mais apertado que `hits * 150 * 2.0`.
+- **`linkIdentity` não é exigido para registrar o Callsign:** o Callsign fica preso à conta anônima. O vínculo com Discord/Google/E-mail ainda não existe (ver pendências).
+- **Importação do save antigo:** por 7 dias a partir da primeira execução do schema, uma conta de servidor zerada pode importar uma única vez o save do `localStorage`. Preços são recalculados pelo catálogo do servidor e os números são limitados (saldo até $1 bilhão, Prestígio até X), mas o conteúdo do save é confiado. Para fechar a janela antes:
+  `UPDATE public.app_settings SET value = now()::text WHERE key = 'legacy_import_until';`
+
+### Catálogo e testes
+
+- O catálogo (18 caixas, 252 skins, preços base) é gerado a partir do `app.js`: rode `node tools/build-catalog-sql.mjs` e reaplique o `schema.sql` sempre que mexer nas caixas ou nas raridades.
+- `tools/tests/` roda o schema real em PGlite e o jogo real em Chromium headless, sem tocar no projeto de produção (`cd tools/tests && npm install && npx playwright install chromium-headless-shell && npm test`). Qualquer mudança de fórmula no `app.js` precisa do espelho no `schema.sql`; os testes de paridade acusam a diferença.
+
+### Pendências (dependem de contas ou decisões externas)
+
+1. **Ativar no Supabase:** ligar "Allow anonymous sign-ins" e executar `supabase/schema.sql` no SQL Editor.
+2. **Pagamentos:** escolher o gateway (Stripe, Mercado Pago ou AbacatePay), criar a Edge Function de checkout e publicar o webhook com as chaves do gateway.
+3. **Upgrade de conta (`linkIdentity`):** configurar os provedores OAuth no painel e criar a tela de vínculo. Até lá, limpar os dados do navegador perde o acesso à conta anônima.
+4. **Passe de Batalha e cosméticos (§1):** falta o desenho do conteúdo (trilhas, recompensas, preços).
+5. **Validação jurídica do §1** com um advogado antes de cobrar.
+6. **Proteção contra abuso de cadastro anônimo:** ligar CAPTCHA/limites no Auth do Supabase antes de divulgar o jogo.

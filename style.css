@@ -1334,6 +1334,58 @@ input::placeholder {
   justify-content: center;
 }
 
+/* ─── Modo servidor: tela de conexão, avisos e selo VIP ─── */
+.modal-backdrop.server-overlay {
+  z-index: 300;
+  background-color: rgba(20, 20, 21, 0.94);
+}
+
+body.server-busy,
+body.server-busy button {
+  cursor: progress;
+}
+
+.nd-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translate(-50%, 16px);
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 12px 18px;
+  background-color: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--hairline);
+  border-left: 4px solid var(--secondary);
+  border-radius: var(--r-lg);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 400;
+}
+
+.nd-toast.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.nd-toast.error {
+  border-left-color: #ff1744;
+}
+
+.nd-toast.success {
+  border-left-color: var(--primary);
+}
+
+.pill-badge.vip-badge {
+  background-color: #ffd700;
+  color: #141415;
+  font-weight: 800;
+}
+
 /* ─── Military Rank & Prestige Top HUD + Barracks ─── */
 .rank-hud-widget {
   display: flex;
