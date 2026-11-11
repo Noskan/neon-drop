@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NEON DROP // Tactical Case &amp; Idle Collection</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Sticky Top Nav (1win Design Language) -->
+  <header class="topbar">
+    <div class="logo">
+      <span class="logo-icon">◈</span>
+      <div>
+        <h1>NEON<span>DROP</span></h1>
+        <small id="api-status-badge">✓ 18 Caixas Táticas Originais • 252 Skins HD</small>
+      </div>
+    </div>
+
+    <div class="idle-hub">
+      <!-- Military Rank & Prestige Top HUD (Black Ops / MW3 Style) -->
+      <div class="rank-hud-widget" id="rank-hud-widget" title="Ganhe XP Tático abrindo caixas e forjando contratos para subir até o Nível 55 e liberar o Prestígio!">
+        <div class="rank-hud-emblem" id="top-rank-emblem"></div>
+        <div class="rank-hud-info">
+          <div class="pity-label">
+            <strong id="top-rank-title" style="color: var(--ink);">Nv. 1 • Soldado</strong>
+            <span id="top-xp-text">0 / 150 XP</span>
+          </div>
+          <div class="pity-track">
+            <div class="pity-fill xp-fill" id="top-xp-fill" style="width: 0%"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="idle-widget" title="Suas skins únicas no inventário geram dinheiro automaticamente a cada segundo!">
+        <div class="pity-label">
+          <span>⏱️ Renda Passiva</span>
+          <strong id="passive-rate-text" class="passive-rate">+$0.15 /s</strong>
+        </div>
+        <div class="idle-subtext">
+          Coleção Ativa: <strong id="passive-skins-count">0</strong> skins • <span id="top-heirloom-count">🔒 0/1 Herança</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="wallet-bar">
+      <div class="balance-box">
+        <span class="balance-label">SALDO</span>
+        <span class="balance-value" id="balance-display">$500.00</span>
+      </div>
+      <button id="sound-toggle" class="btn-icon" title="Alternar Som">🔊</button>
+    </div>
+  </header>
+
+  <!-- App Shell: Fixed Left Sidebar Rail + Fluid Content Column -->
+  <div class="app-shell">
+    <aside class="sidebar-rail">
+      <nav class="nav-tabs">
+        <button class="tab-btn active" data-tab="cases">
+          <span class="nav-glyph">📦</span>
+          <span class="nav-text">Caixas</span>
+        </button>
+        <button class="tab-btn" data-tab="inventory">
+          <span class="nav-glyph">🎒</span>
+          <span class="nav-text">Coleção</span>
+          <span class="pill-badge" id="inv-count">0</span>
+        </button>
+        <button class="tab-btn" data-tab="tradeup">
+          <span class="nav-glyph">⚗️</span>
+          <span class="nav-text">Contrato</span>
+          <span class="pill-badge"><span id="trade-count">0</span>/5</span>
+        </button>
+        <button class="tab-btn" data-tab="stats">
+          <span class="nav-glyph">🏆</span>
+          <span class="nav-text">Prestígio</span>
+        </button>
+      </nav>
+    </aside>
+
+    <main class="container">
+      <!-- TAB 1: CASES & ROULETTE -->
+      <section id="tab-cases" class="tab-content active">
+        <!-- Case Filter & Catalog Bar -->
+        <div class="catalog-bar">
+          <div class="catalog-left">
+            <span class="catalog-label">Filtrar Tier</span>
+            <select id="tier-filter-select" class="select-input" title="Filtrar as caixas exibidas por Tier de preço">
+              <option value="ALL">Todos os Tiers (Destaques T1–T6)</option>
+              <option value="1">Tier 1 — Recruta ($25 – $45)</option>
+              <option value="2">Tier 2 — Operador ($120 – $220)</option>
+              <option value="3">Tier 3 — Especialista ($550 – $950)</option>
+              <option value="4">Tier 4 — Comandante ($2.400 – $4.200)</option>
+              <option value="5">Tier 5 — Mestre ($10.500 – $18.000)</option>
+              <option value="6">Tier 6 — Lenda ($38.000 – $65.000)</option>
+            </select>
+
+            <span class="catalog-label" style="margin-left: 8px;">Caixa</span>
+            <select id="all-cases-select" class="select-input">
+              <option value="">Carregando catálogo de caixas...</option>
+            </select>
+          </div>
+          <div class="catalog-right">
+            <span class="pill-outline">100% IP Original • 16 Silhuetas • SyncTrack™</span>
+          </div>
+        </div>
+
+        <!-- Featured Cases Rail -->
+        <div class="rail-header">
+          <span class="rail-title">Caixas em Destaque</span>
+          <span class="rail-caption">Selecione uma caixa para abrir ou inspecionar o arsenal</span>
+        </div>
+        <div class="cases-grid" id="cases-grid"></div>
+
+        <!-- Active Case & Roulette Arena -->
+        <div class="roulette-arena">
+          <div class="arena-header">
+            <div class="active-case-header-info">
+              <div id="active-case-thumb" class="active-case-thumb"></div>
+              <div>
+                <div class="case-title-row">
+                  <h2 id="active-case-title">Selecione uma Caixa</h2>
+                  <span id="active-case-mastery-badge" class="mastery-badge">0/0 Coleção</span>
+                </div>
+                <p id="active-case-desc">Escolha uma caixa acima para ver as skins e girar a roleta.</p>
+              </div>
+            </div>
+            <div class="spin-controls">
+              <!-- Multi-open count selector -->
+              <div class="multi-selector" title="Quantidade de caixas para abrir simultaneamente">
+                <button class="multi-btn active" data-count="1">1x</button>
+                <button class="multi-btn" data-count="2">2x</button>
+                <button class="multi-btn" data-count="3">3x</button>
+                <button class="multi-btn" data-count="5">5x</button>
+              </div>
+
+              <label class="fast-toggle">
+                <input type="checkbox" id="fast-mode-checkbox" />
+                <span>⚡ Rápido</span>
+              </label>
+
+              <button id="open-case-btn" class="btn-open">
+                ABRIR <span id="open-case-count-label">1x</span> • <span id="open-case-price">$0.00</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Dynamic Multi-Roulette Stack -->
+          <div class="roulette-stack" id="roulette-stack"></div>
+
+          <!-- Possible Drops in Current Case -->
+          <div class="case-contents-section">
+            <div class="section-title-row">
+              <h3>Arsenal &amp; Lâminas nesta Caixa (<span id="case-items-count">0</span>)</h3>
+              <div class="odds-pills">
+                <span class="pill rarity-blue">Padrão 75%</span>
+                <span class="pill rarity-purple">Tático 16%</span>
+                <span class="pill rarity-pink">Protótipo 5.5%</span>
+                <span class="pill rarity-red">Relíquia 2.5%</span>
+                <span class="pill rarity-gold">★ Apex Mítico 1.0%</span>
+              </div>
+            </div>
+            <div class="case-items-grid" id="case-items-grid"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: INVENTORY & COLLECTION -->
+      <section id="tab-inventory" class="tab-content">
+        <div class="inventory-toolbar">
+          <div class="inv-summary">
+            <div>
+              <span>Valor do Inventário: <strong id="inv-total-value">$0.00</strong></span>
+            </div>
+            <div class="collection-progress-widget">
+              <div class="collection-progress-label">
+                <span>Coleção (<span id="collection-scope-name">Caixa Atual</span>):</span>
+                <strong id="collection-progress-text">0 / 0 (0%)</strong>
+              </div>
+              <div class="pity-track">
+                <div class="pity-fill collection-fill" id="collection-progress-bar" style="width: 0%"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="inv-actions">
+            <!-- 3 Collection Filter Options: Owned, Not Owned, All -->
+            <div class="collection-filter-group" id="collection-filter-group">
+              <button class="col-filter-btn active" data-filter="owned">Owned</button>
+              <button class="col-filter-btn" data-filter="not-owned">Not Owned</button>
+              <button class="col-filter-btn" data-filter="all">All</button>
+            </div>
+
+            <select id="inv-case-select" class="select-input" title="Filtrar coleção por caixa">
+              <option value="ALL">Todas as Caixas</option>
+            </select>
+
+            <select id="inv-sort-select" class="select-input">
+              <option value="value-desc">Maior Valor</option>
+              <option value="rarity-desc">Maior Raridade</option>
+              <option value="recent">Mais Recentes</option>
+            </select>
+            <button id="sell-dupes-btn" class="btn-secondary" title="Mantém a cópia mais valiosa de cada skin e vende as repetidas">
+              Vender Duplicadas (<span id="dupes-count">0</span>)
+            </button>
+          </div>
+        </div>
+        <div class="inventory-grid" id="inventory-grid"></div>
+      </section>
+
+      <!-- TAB 3: TRADE-UP CONTRACT -->
+      <section id="tab-tradeup" class="tab-content">
+        <div class="tradeup-panel">
+          <div class="tradeup-info">
+            <h2>⚗️ Contrato de Troca (Trade-Up)</h2>
+            <p>Escolha <strong>5 skins da mesma raridade</strong> do seu inventário para forjar <strong>1 item garantido da raridade superior</strong>!</p>
+          </div>
+          <div class="tradeup-slots" id="tradeup-slots"></div>
+          <div class="tradeup-actions">
+            <button id="autofill-dupes-btn" class="btn-secondary" title="Seleciona 5 itens repetidos da mesma raridade sem consumir a cópia titular da sua coleção!">
+              ⚡ Preencher com 5 Duplicadas
+            </button>
+            <button id="clear-tradeup-btn" class="btn-tertiary">Limpar Seleção</button>
+            <button id="execute-tradeup-btn" class="btn-open" disabled>ASSINAR CONTRATO</button>
+          </div>
+        </div>
+        <h3 class="mt-title">Itens Elegíveis no Inventário</h3>
+        <div class="inventory-grid" id="tradeup-eligible-grid"></div>
+      </section>
+
+      <!-- TAB 4: PRESTIGE BARRACKS, ACHIEVEMENTS & STATS -->
+      <section id="tab-stats" class="tab-content">
+        <div class="prestige-barracks">
+          <div class="barracks-left">
+            <div class="barracks-emblem-box" id="barracks-emblem"></div>
+            <div class="barracks-meta">
+              <span class="pill-badge" id="barracks-prestige-tag">SEM PRESTÍGIO</span>
+              <h2 id="barracks-rank-title" style="margin-top: 6px;">Nível 1 • Soldado</h2>
+              <p id="prestige-level-text" style="color: var(--muted); font-size: 13px; margin: 4px 0 10px;">
+                Suba até a Patente Nível 55 (Comandante Supremo) e cumpra os requisitos de coleção para entrar no Prestígio!
+              </p>
+              <div class="barracks-xp-wrap">
+                <div class="pity-label">
+                  <span>Progresso da Patente Militar</span>
+                  <strong id="barracks-xp-text" style="color: var(--secondary);">0 / 150 XP</strong>
+                </div>
+                <div class="pity-track" style="height: 8px;">
+                  <div class="pity-fill xp-fill" id="barracks-xp-fill" style="width: 0%"></div>
+                </div>
+              </div>
+              <div class="perks-pills" id="barracks-perks-pills"></div>
+            </div>
+          </div>
+
+          <div class="barracks-right">
+            <h3>🎖️ Requisitos para o Próximo Prestígio</h3>
+            <div class="prestige-checklist" id="prestige-checklist"></div>
+            <div class="heirloom-callout" id="heirloom-status-text">
+              🔒 Tokens de Herança Permanente: 0 / 1 skin protegida no Inventário
+            </div>
+            <button id="prestige-btn" class="btn-open" style="width: 100%; margin-top: 10px;" disabled>
+              🎖️ ENTRAR NO PRESTÍGIO I (+50% $/s &amp; Bônus Veterano)
+            </button>
+          </div>
+        </div>
+
+        <h2 class="mt-title">🎖️ Galeria de Patentes de Prestígio (Níveis I a X — Mestre)</h2>
+        <div class="prestige-gallery-grid" id="prestige-emblems-grid" style="margin-bottom: 24px;"></div>
+
+        <h2 class="mt-title">🏆 Conquistas Táticas (Bônus Permanentes de $/s)</h2>
+        <div class="stats-grid" id="achievements-grid" style="margin-bottom: 24px;"></div>
+
+        <h2 class="mt-title">📊 Estatísticas da Conta</h2>
+        <div class="stats-grid" id="stats-grid"></div>
+        <div class="reset-zone">
+          <button id="reset-save-btn" class="btn-danger">Resetar Progresso Salvo</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- MODAL: UNBOXED ITEM(S) REVEAL -->
+  <div class="modal-backdrop hidden" id="reward-modal">
+    <div class="modal-card" id="reward-modal-card">
+      <div class="modal-glow" id="reward-modal-glow"></div>
+      <h3 class="modal-header-title" id="reward-modal-title">ITEM DESBLOQUEADO</h3>
+      <div class="rewards-showcase" id="rewards-showcase"></div>
+      <div class="reward-total-bar">
+        <span>Valor Total Obtido:</span>
+        <strong id="reward-total-price">$0.00</strong>
+      </div>
+      <div class="modal-buttons">
+        <button id="modal-sell-btn" class="btn-danger">Vender Tudo por <span id="modal-sell-val">$0</span></button>
+        <button id="modal-keep-btn" class="btn-open">Guardar Tudo no Inventário</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: OFFLINE EARNINGS -->
+  <div class="modal-backdrop hidden" id="offline-modal">
+    <div class="modal-card" style="max-width: 440px;">
+      <div class="modal-glow" style="background: #00b24b;"></div>
+      <h3 class="modal-header-title">⏱️ BEM-VINDO DE VOLTA!</h3>
+      <p style="color: var(--text-muted); font-size: 14px; margin-bottom: 16px;">
+        Suas skins únicas continuaram gerando renda passiva enquanto você esteve ausente (<span id="offline-time-text">0m</span>, limite de 12h):
+      </p>
+      <div class="reward-total-bar" style="margin: 18px 0;">
+        <strong id="offline-earned-price" style="font-size: 33px;">+$0.00</strong>
+      </div>
+      <div class="modal-buttons">
+        <button id="offline-claim-btn" class="btn-open">Coletar Ganhos Offline</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
