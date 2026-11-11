@@ -3322,6 +3322,8 @@ function startGridshotChallenge() {
   if (gridshotActive) return;
   if (Date.now() < gridshotCooldownUntil) return;
 
+  window.neonBackend?.startGridshotSession().catch(() => {});
+
   gridshotActive = true;
   gridshotScore = 0;
   gridshotTimeLeft = 30;
@@ -3385,6 +3387,14 @@ function endGridshotChallenge() {
   updateTopBar();
   updateAimLabHUD();
   publishMyScoreToCloud(true);
+  window.neonBackend
+    ?.submitGridshotSession({
+      score: gridshotScore,
+      hits: aimSessionHits,
+      shots: aimSessionShots,
+      equippedUid: state.equippedUid,
+    })
+    .catch(() => {});
 
   const accPct = aimSessionShots > 0 ? Math.round((aimSessionHits / aimSessionShots) * 100) : 100;
   const banner = document.getElementById('aimlab-banner-overlay');
