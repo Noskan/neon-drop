@@ -946,6 +946,7 @@ const sfx = new SoundEngine();
 const defaultState = {
   playerId: 'op_' + Math.random().toString(36).slice(2, 10),
   callsign: '',
+  callsignLocked: false,
   equippedUid: null,
   balance: 500,
   lastSavedAt: Date.now(),
@@ -984,6 +985,7 @@ function loadState() {
         ...parsed,
         playerId: parsed.playerId || ('op_' + Math.random().toString(36).slice(2, 10)),
         callsign: typeof parsed.callsign === 'string' ? parsed.callsign : '',
+        callsignLocked: Boolean(parsed.callsignLocked || (typeof parsed.callsign === 'string' && parsed.callsign.trim().length > 0)),
         heirloomUids: Array.isArray(parsed.heirloomUids) ? parsed.heirloomUids : [],
         stats: {
           ...defaultState.stats,
@@ -2618,13 +2620,40 @@ function buildMyLeaderboardEntry() {
   };
 }
 
+function isCallsignTakenByOther(candidateName, myPlayerId = state.playerId) {
+  const norm = String(candidateName || '').trim().toLowerCase();
+  if (!norm) return false;
+  return Object.values(lbPlayersMap).some(
+    (p) =>
+      p &&
+      p.playerId !== myPlayerId &&
+      p.playerId !== 'test_init' &&
+      String(p.callsign || '').trim().toLowerCase() === norm
+  );
+}
+
 function mergeLeaderboardEntry(entry) {
   if (!entry || !entry.playerId || entry.playerId === 'test_init') return;
-  const prev = lbPlayersMap[entry.playerId];
+  const pid = String(entry.playerId);
+  const prev = lbPlayersMap[pid];
+
   if (!prev || (entry.updatedAt || 0) >= (prev.updatedAt || 0)) {
-    lbPlayersMap[entry.playerId] = {
-      playerId: String(entry.playerId),
-      callsign: String(entry.callsign || 'Operador').slice(0, 18),
+    let incomingCallsign = String(entry.callsign || 'Operador').trim().slice(0, 18);
+
+    // 1. If this player already locked a custom callsign (not default 'Operador-XXXX'), keep their original locked callsign!
+    if (prev && prev.callsign && !prev.callsign.startsWith('Operador-')) {
+      incomingCallsign = prev.callsign;
+    }
+
+    // 2. If another operator already owns this callsign, append a unique #TAG so names never collide
+    if (isCallsignTakenByOther(incomingCallsign, pid)) {
+      const tag = pid.slice(-4).toUpperCase();
+      incomingCallsign = `${incomingCallsign.slice(0, 13)}#${tag}`;
+    }
+
+    lbPlayersMap[pid] = {
+      playerId: pid,
+      callsign: incomingCallsign,
       prestigeLevel: Number(entry.prestigeLevel) || 0,
       milLevel: Math.min(55, Math.max(1, Number(entry.milLevel) || 1)),
       xp: Number(entry.xp) || 0,
@@ -2774,8 +2803,25 @@ function formatRankLabelForEntry(p) {
 
 function renderLeaderboard() {
   const callsignInput = document.getElementById('lb-callsign-input');
-  if (callsignInput && document.activeElement !== callsignInput) {
-    callsignInput.value = state.callsign || '';
+  const callsignLabel = document.getElementById('lb-callsign-label');
+  const syncBtn = document.getElementById('lb-sync-btn');
+
+  if (callsignInput) {
+    if (state.callsignLocked && state.callsign) {
+      callsignInput.value = state.callsign;
+      callsignInput.disabled = true;
+      callsignInput.title = 'Seu Callsign já foi registrado permanentemente para esta conta.';
+      if (callsignLabel) callsignLabel.textContent = '🔒 CALLSIGN REGISTRADO:';
+      if (syncBtn) syncBtn.textContent = '📡 Sincronizar Progresso';
+    } else {
+      callsignInput.disabled = false;
+      callsignInput.title = 'Escolha um Callsign único (não poderá ser alterado depois)';
+      if (document.activeElement !== callsignInput) {
+        callsignInput.value = state.callsign || '';
+      }
+      if (callsignLabel) callsignLabel.textContent = 'DEFINIR CALLSIGN ÚNICO:';
+      if (syncBtn) syncBtn.textContent = '🔒 Registrar Callsign & Publicar';
+    }
   }
 
   const entries = getSortedLeaderboardEntries();
@@ -2846,14 +2892,54 @@ function renderLeaderboard() {
     .join('');
 }
 
-document.getElementById('lb-sync-btn')?.addEventListener('click', () => {
+let manualSyncCooldownUntil = 0;
+
+document.getElementById('lb-sync-btn')?.addEventListener('click', async () => {
+  const now = Date.now();
+  if (now < manualSyncCooldownUntil) {
+    const rem = Math.ceil((manualSyncCooldownUntil - now) / 1000);
+    alert(`⏳ Aguarde ${rem}s antes de sincronizar manualmente novamente.`);
+    return;
+  }
+
   const input = document.getElementById('lb-callsign-input');
-  if (input) {
-    state.callsign = input.value.trim().slice(0, 18);
+
+  // If Callsign is not locked yet, validate & lock it permanently!
+  if (!state.callsignLocked) {
+    const candidate = (input?.value || '').trim().slice(0, 18);
+    if (candidate.length < 3) {
+      alert('⚠️ Digite um Callsign com pelo menos 3 caracteres para registrar no placar.');
+      return;
+    }
+    if (candidate.toLowerCase().startsWith('operador-')) {
+      alert('⚠️ Escolha um Callsign personalizado (não pode começar com "Operador-").');
+      return;
+    }
+
+    // Fetch latest cloud entries first to make sure nobody else took this name
+    await fetchGlobalLeaderboard();
+
+    if (isCallsignTakenByOther(candidate, state.playerId)) {
+      alert(`⚠️ O Callsign "${candidate}" já está em uso por outro operador! Escolha um nome único.`);
+      return;
+    }
+
+    if (
+      !confirm(
+        `🔒 Confirmar registro permanente do Callsign "${candidate}"?\n\nUma vez registrado, seu Callsign fica vinculado à sua conta e não poderá ser trocado.`
+      )
+    ) {
+      return;
+    }
+
+    state.callsign = candidate;
+    state.callsignLocked = true;
     saveState();
   }
+
+  manualSyncCooldownUntil = Date.now() + 15000;
   sfx.coin();
-  publishMyScoreToCloud(true);
+  await publishMyScoreToCloud(true);
 });
 
 document.getElementById('lb-refresh-btn')?.addEventListener('click', () => {
