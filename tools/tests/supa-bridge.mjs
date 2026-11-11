@@ -28,6 +28,7 @@ export async function createBridge(schemaSqls) {
     anonEnabled: true,
     down: false, // true = every request fails at the network level
     hang: false, // true = requests are accepted and never answered
+    expiresIn: 3600, // access token lifetime the fake Auth announces
     failWith: null, // (method, url) => { status, body } to answer instead of the database
     log: [],
     tokens: new Map(), // access token -> user id
@@ -62,7 +63,7 @@ export async function createBridge(schemaSqls) {
     const n = ++bridge.seq;
     bridge.tokens.set(`tok${n}`, uid);
     bridge.refresh.set(`ref${n}`, uid);
-    return { access_token: `tok${n}`, refresh_token: `ref${n}`, expires_in: 3600, user: { id: uid } };
+    return { access_token: `tok${n}`, refresh_token: `ref${n}`, expires_in: bridge.expiresIn, user: { id: uid } };
   };
 
   // Returns { status, body }

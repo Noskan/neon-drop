@@ -505,7 +505,42 @@ const seed = async (bridge, uid, where, copies = 1, extra = '') => {
   const hungState = { free: !!free, btnDisabled: await page.isDisabled('#open-case-btn'), answered: calls(bridge, 'open_case_rpc').length - sentBefore, inv: await page.evaluate(() => state.inventory.length) };
   ok(/Sem resposta do servidor/.test(hung || '') && hungState.free && !hungState.btnDisabled && hungState.answered === 0 && hungState.inv === 1,
     'a request that never gets an answer is given up after the timeout and the game is usable again', `${hung} ${JSON.stringify(hungState)}`);
+  const deadlines = await page.evaluate(async () => {
+    const time = async (fn) => { const t0 = performance.now(); const code = await fn().then(() => 'ok', (e) => e.code); return { ms: Math.round(performance.now() - t0), code }; };
+    return { sell: await time(() => window.neonBackend.sellDuplicates()), imp: await time(() => window.neonBackend.importLegacySave({})) };
+  });
+  ok(deadlines.sell.code === 'NETWORK' && deadlines.sell.ms < 1500 && deadlines.imp.code === 'NETWORK' && deadlines.imp.ms > 2200 && deadlines.imp.ms < 4000,
+    'the legacy-save upload gets four times the deadline of an ordinary action', JSON.stringify(deadlines));
   bridge.hang = false;
+
+  // headers arrive, then the body stalls / arrives cut
+  const hideToast = () => page.evaluate(() => document.getElementById('nd-toast')?.classList.remove('visible'));
+  await page.evaluate(() => {
+    const real = window.fetch;
+    window.__bodyFault = null;
+    window.fetch = (url, opts = {}) => {
+      if (!window.__bodyFault || !String(url).includes('/rpc/open_case_rpc')) return real(url, opts);
+      const head = new TextEncoder().encode('{"items":[');
+      const body = window.__bodyFault === 'cut' ? head : new ReadableStream({
+        start(c) {
+          c.enqueue(head);
+          opts.signal?.addEventListener('abort', () => c.error(new DOMException('aborted', 'AbortError')));
+        },
+      });
+      return Promise.resolve(new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }));
+    };
+  });
+  for (const [fault, label] of [['stall', 'a response whose body stalls after the headers is given up as well'], ['cut', 'a 200 with a truncated body is reported as a connection problem, not as a refusal']]) {
+    await until(() => page.evaluate(() => !server.busy && !isSpinning), 6000);
+    await hideToast();
+    await page.evaluate((f) => { window.__bodyFault = f; }, fault);
+    await page.click('#open-case-btn');
+    const t = await until(() => p.toast(), 6000);
+    await page.evaluate(() => { window.__bodyFault = null; });
+    const free = await until(() => page.evaluate(() => !isSpinning && !server.busy), 6000);
+    ok(/Sem resposta do servidor/.test(t || '') && !!free && !(await page.isDisabled('#open-case-btn')), label, t || 'no notice (still waiting)');
+    if (!free) { await p.reload(); await page.evaluate(() => { window.neonBackend.requestTimeoutMs = 600; }); break; } // stuck for good: start over so the rest can run
+  }
   bridge.down = true;
 
   await page.reload({ waitUntil: 'load' });
@@ -632,14 +667,110 @@ const seed = async (bridge, uid, where, copies = 1, extra = '') => {
   await page.click('#modal-keep-btn');
 
   // leaderboard read fails: the open ntfy.sh topic is never used as a substitute
-  bridge.failWith = (method) => (method === 'GET' ? { status: 503, body: { message: 'upstream unavailable' } } : null);
+  const rival = (await one(bridge, `INSERT INTO auth.users DEFAULT VALUES RETURNING id`)).id;
+  await bridge.sql(`INSERT INTO public.profiles (id, player_id, cases_opened) VALUES ($1, 'op_rival', 3) ON CONFLICT (id) DO UPDATE SET cases_opened = 3`, [rival]);
   await p.tab('leaderboard');
+  await page.evaluate(() => fetchGlobalLeaderboard());
+  await until(async () => /Atualizado/.test(await page.textContent('#lb-sync-status')));
+  const boardBefore = await page.evaluate(() => Object.keys(lbPlayersMap).length);
+  const profileReads = calls(bridge, '/rest/v1/profiles').length;
+  bridge.failWith = (method, url) => (url.pathname.endsWith('/leaderboard_global_view') ? { status: 503, body: { message: 'upstream unavailable' } } : null);
   await page.evaluate(() => fetchGlobalLeaderboard());
   const lbStatus = await until(async () => { const t = await page.textContent('#lb-sync-status'); return /indisponível/.test(t) ? t : null; });
   ok(!!lbStatus && !p.external.some((u) => /ntfy\.sh/.test(u)), 'when the ranking cannot be read nothing is fetched from ntfy.sh', lbStatus || p.external.join(','));
+  ok(boardBefore === 2 && (await page.evaluate(() => Object.keys(lbPlayersMap).length)) === 2 && calls(bridge, '/rest/v1/profiles').length === profileReads,
+    'a passing error on the ranking view keeps the board: the own-row-only profiles table is not read in its place', `${boardBefore} rows, ${calls(bridge, '/rest/v1/profiles').length - profileReads} table reads`);
   bridge.failWith = null;
   ok(p.errors.length === 0, 'no JS errors', p.errors.join(' | '));
   await p.ctx.close();
+}
+
+// ===========================================================================
+// H. Session handling fixed after the backend-adapter.js review
+// ===========================================================================
+{
+  const KEY = 'neondrop_sb_session_v1';
+  const bridge = await createBridge([NEW_SCHEMA]);
+  const p = await player(bridge);
+  const { page } = p;
+  const uid = await p.uid();
+  ok(await p.openCase(), 'baseline: case opened');
+  await page.click('#modal-keep-btn');
+  const stored = () => page.evaluate((k) => JSON.parse(localStorage.getItem(k)), KEY);
+  const hideToast = (pg = page) => pg.evaluate(() => document.getElementById('nd-toast')?.classList.remove('visible'));
+  const signups = () => calls(bridge, '/auth/v1/signup').length;
+  const refreshes = () => calls(bridge, '/auth/v1/token').length;
+  const overlayTitle = (re) => until(async () => { const t = await page.evaluate(() => document.getElementById('server-overlay-title')?.textContent || ''); return re.test(t) ? t : null; }, 15000);
+
+  // 1. the refresh is refused for a reason that says nothing about the refresh token
+  const first = await stored();
+  await page.evaluate((k) => { const s = JSON.parse(localStorage.getItem(k)); s.expires_at_ms = 0; localStorage.setItem(k, JSON.stringify(s)); }, KEY);
+  bridge.failWith = (method, url) => (url.pathname === '/auth/v1/token' ? { status: 401, body: { message: 'Invalid API key', hint: 'Double check your Supabase `anon` or `service_role` API key.' } } : null);
+  await page.reload({ waitUntil: 'load' });
+  const t1 = await overlayTitle(/CONTA DE JOGO INDISPONÍVEL/);
+  ok(!!t1 && signups() === 1 && (await stored())?.refresh_token === first.refresh_token, 'a refresh refused with "Invalid API key" keeps the account: no new sign-up, credential still stored', `${t1} signups=${signups()}`);
+  bridge.failWith = null;
+  await page.click('#server-overlay-retry');
+  await p.ready();
+  ok((await p.uid()) === uid && (await page.evaluate(() => state.inventory.length)) === 1 && signups() === 1, 'once the Auth answers again the same account and its inventory come back');
+
+  // 4. two tabs, the server stops accepting the access token before its local expiry
+  const pageB = await p.ctx.newPage();
+  await pageB.goto(ORIGIN + '/index.html', { waitUntil: 'load' });
+  await until(() => pageB.evaluate(() => typeof server !== 'undefined' && server.mode === 'authoritative' && !server.busy));
+  await until(() => page.evaluate(() => !server.busy));
+  const refreshBefore = refreshes();
+  bridge.tokens.clear();
+  const bState = await pageB.evaluate(() => window.neonBackend.getMyState().then((s) => s.profile.player_id, (e) => e.code));
+  const afterB = await stored();
+  await page.check('#fast-mode-checkbox');
+  await page.click('#open-case-btn');
+  const openedA = await until(() => page.evaluate(() => !document.getElementById('reward-modal').classList.contains('hidden')), 9000);
+  const afterA = await stored();
+  ok(bState === uid && !!openedA && refreshes() === refreshBefore + 1 && signups() === 1 && afterA.refresh_token === afterB.refresh_token && afterA.access_token === afterB.access_token,
+    'tab A picks up the session tab B renewed instead of overwriting it with its stale one', JSON.stringify({ bState, openedA: !!openedA, refreshes: refreshes() - refreshBefore, signups: signups() }));
+  await page.click('#modal-keep-btn');
+  await pageB.close();
+
+  // 6. token rejected and the renewal cannot reach the Auth
+  await p.idle();
+  await hideToast();
+  bridge.tokens.clear();
+  bridge.failWith = (method, url) => (url.pathname === '/auth/v1/token' ? { status: 503, body: {} } : null);
+  const opensBefore = calls(bridge, 'open_case_rpc').length;
+  const keep = await stored();
+  await page.click('#open-case-btn');
+  const t6 = await until(() => p.toast(), 6000);
+  await until(() => page.evaluate(() => !server.busy && !isSpinning), 6000);
+  ok(/Sem resposta do servidor/.test(t6 || '') && calls(bridge, 'open_case_rpc').length === opensBefore + 1 && (await stored())?.refresh_token === keep.refresh_token,
+    'rejected token + renewal unreachable: reported as a connection problem, the call is not repeated without a token', `${t6} calls=${calls(bridge, 'open_case_rpc').length - opensBefore}`);
+  bridge.failWith = null;
+  await page.evaluate(() => resyncServerState());
+  await p.idle();
+
+  // 1b. the Auth says the session no longer exists: a new account, and the pending action is not replayed on it
+  await hideToast();
+  bridge.tokens.clear();
+  bridge.refresh.clear();
+  const opens2 = calls(bridge, 'open_case_rpc').length;
+  await page.click('#open-case-btn');
+  const t7 = await until(() => p.toast(), 6000);
+  await until(() => page.evaluate(() => !server.busy && !isSpinning), 6000);
+  const newUid = (await stored())?.user_id;
+  const newOpened = newUid ? await one(bridge, `SELECT cases_opened FROM public.profiles WHERE id = $1`, [newUid]) : null;
+  ok(/Recarregue a página/.test(t7 || '') && signups() === 2 && newUid && newUid !== uid && calls(bridge, 'open_case_rpc').length === opens2 + 1 && !(newOpened?.cases_opened > 0),
+    'session revoked for real: a new account is created, the action is not run on it, the player is told to reload', `${t7} signups=${signups()} calls=${calls(bridge, 'open_case_rpc').length - opens2}`);
+  ok(p.errors.length === 0, 'no JS errors', p.errors.join(' | '));
+  await p.ctx.close();
+
+  // 8. project configured with a short access-token lifetime
+  const bridge2 = await createBridge([NEW_SCHEMA]);
+  bridge2.expiresIn = 45;
+  const p2 = await player(bridge2);
+  const fresh = await p2.page.evaluate(() => ({ mode: server.mode, fresh: window.neonBackend.hasFreshSession() }));
+  ok(fresh.mode === 'authoritative' && fresh.fresh && (await p2.openCase()) && calls(bridge2, '/auth/v1/token').length === 0 && p2.errors.length === 0,
+    'a 45-second access token is used until it nears expiry instead of being refreshed on every call', JSON.stringify(fresh));
+  await p2.ctx.close();
 }
 
 await browser.close();

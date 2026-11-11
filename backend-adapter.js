@@ -17,6 +17,15 @@ window.NEON_DROP_BACKEND_CONFIG = {
 
 const NEON_DROP_SESSION_KEY = 'neondrop_sb_session_v1';
 const NEON_DROP_AUTH_LOCK = 'neondrop_sb_auth_lock';
+// Respostas do Auth que dizem, sem ambiguidade, que a sessão guardada não existe mais
+const NEON_DROP_SESSION_GONE_CODES = new Set([
+  'refresh_token_not_found',
+  'refresh_token_already_used',
+  'session_not_found',
+  'session_expired',
+  'user_not_found',
+  'invalid_grant',
+]);
 
 class NeonDropCommercialAdapter {
   constructor(config) {
@@ -29,15 +38,41 @@ class NeonDropCommercialAdapter {
     // 'network' (sem conexão / servidor fora) ou 'rejected' (login anônimo desligado, limite atingido)
     this.lastAuthFailure = null;
     this.activeGridshotSessionId = null;
-    // Uma requisição que não responde nesse tempo é tratada como falha de rede
+    // Access token que o servidor recusou com 401 (vale só nesta aba, não vai para o storage)
+    this.rejectedAccessToken = null;
+    // Prazo base de uma requisição; chamadas com corpo grande usam um múltiplo dele
     this.requestTimeoutMs = 15000;
   }
 
-  // fetch com prazo: numa conexão que trava sem falhar, a promessa nunca se resolveria
-  fetchWithTimeout(url, options = {}) {
+  makeError(code, message, status = 0) {
+    const err = new Error(message);
+    err.code = code;
+    err.status = status;
+    return err;
+  }
+
+  // Requisição com prazo que cobre o envio, os cabeçalhos E a leitura do corpo: numa conexão
+  // que trava sem falhar, nenhuma dessas etapas se resolveria sozinha.
+  // Devolve { ok, status, data, parsed }; lança em falha de rede ou estouro do prazo.
+  async request(url, options = {}, timeoutMs = this.requestTimeoutMs) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
-    return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      const text = await res.text();
+      let data = null;
+      let parsed = true;
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          parsed = false;
+        }
+      }
+      return { ok: res.ok, status: res.status, data, parsed };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -57,12 +92,14 @@ class NeonDropCommercialAdapter {
   }
 
   storeSession(data) {
+    const lifetimeMs = Math.max(10, Number(data.expires_in) || 3600) * 1000;
     this.session = {
       access_token: data.access_token,
       refresh_token: data.refresh_token,
       user_id: data.user?.id || this.session?.user_id || null,
       // Validade medida no relógio local, para não depender do relógio do jogador estar certo
-      expires_at_ms: Date.now() + Math.max(60, Number(data.expires_in) || 3600) * 1000,
+      expires_at_ms: Date.now() + lifetimeMs,
+      lifetime_ms: lifetimeMs,
     };
     try {
       localStorage.setItem(NEON_DROP_SESSION_KEY, JSON.stringify(this.session));
@@ -81,33 +118,39 @@ class NeonDropCommercialAdapter {
     }
   }
 
-  // Marca o access token como vencido (também no storage, que é de onde acquireSession relê)
-  markSessionExpired() {
-    if (!this.session) return;
-    this.session.expires_at_ms = 0;
-    try {
-      localStorage.setItem(NEON_DROP_SESSION_KEY, JSON.stringify(this.session));
-    } catch (e) {
-      // ignore
-    }
-  }
-
   hasFreshSession() {
-    return Boolean(this.session?.access_token && this.session.expires_at_ms - 60000 > Date.now());
+    const s = this.session;
+    // Um token recusado pelo servidor não serve mais, diga o relógio local o que disser. Isso fica
+    // só na memória: regravar o storage aqui apagaria a sessão que outra aba já tenha renovado.
+    if (!s?.access_token || s.access_token === this.rejectedAccessToken) return false;
+    // Renova um pouco antes de vencer: 60 s, ou 20% da validade em tokens de vida curta
+    const margin = Math.min(60000, (s.lifetime_ms || 3600000) * 0.2);
+    return s.expires_at_ms - margin > Date.now();
   }
 
   async authRequest(path, body) {
     try {
-      const res = await this.fetchWithTimeout(`${this.url}/auth/v1/${path}`, {
+      const res = await this.request(`${this.url}/auth/v1/${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', apikey: this.anonKey },
         body: JSON.stringify(body),
       });
-      const data = await res.json().catch(() => ({}));
+      const data = res.data && typeof res.data === 'object' ? res.data : {};
       return { ok: res.ok, status: res.status, data };
     } catch (e) {
       return { ok: false, status: 0, data: {} };
     }
+  }
+
+  // A conta anônima só existe neste navegador: jogar fora o refresh token é perder o progresso.
+  // Então só vale como "sessão extinta" a recusa explícita do Auth; chave trocada, proxy, WAF ou
+  // resposta ilegível NÃO contam.
+  isSessionGone(res) {
+    if (res.status < 400 || res.status >= 500 || res.status === 429) return false;
+    const d = res.data || {};
+    const codes = [d.error_code, d.code, d.error].filter((c) => typeof c === 'string');
+    if (codes.some((c) => NEON_DROP_SESSION_GONE_CODES.has(c))) return true;
+    return /refresh token/i.test(String(d.msg || d.message || d.error_description || ''));
   }
 
   // Devolve a sessão válida (renovando ou criando a conta anônima) ou null se o Auth não estiver disponível.
@@ -146,12 +189,13 @@ class NeonDropCommercialAdapter {
         this.lastAuthFailure = null;
         return this.storeSession(res.data);
       }
-      // Falha de rede, limite de requisições ou erro do servidor: mantém a conta e tenta de novo depois
-      if (isTransient(res.status)) {
-        this.lastAuthFailure = 'network';
+      if (!this.isSessionGone(res)) {
+        // Rede, limite, erro do servidor ou uma recusa que não fala do refresh token:
+        // a conta fica guardada e a próxima ação tenta renovar de novo
+        this.lastAuthFailure = isTransient(res.status) ? 'network' : 'rejected';
         return null;
       }
-      // O servidor recusou o refresh token: a sessão antiga não existe mais
+      // O Auth disse que esse refresh token / sessão não existe mais
       this.clearSession();
     }
 
@@ -188,33 +232,47 @@ class NeonDropCommercialAdapter {
 
   // Erros saem com `code` (prefixo do RAISE do servidor, ex.: INSUFFICIENT_BALANCE, ou
   // NETWORK / RPC_MISSING / AUTH_REJECTED / SERVER_ERROR), `status` HTTP e `userMessage`.
-  async rpc(fnName, params = {}) {
+  async rpc(fnName, params = {}, { timeoutMs = this.requestTimeoutMs } = {}) {
     if (!this.isCommercialServerEnabled) return null;
     await this.ensureSession();
-    const call = () =>
-      this.fetchWithTimeout(`${this.url}/rest/v1/rpc/${fnName}`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify(params),
-      });
+    let sentToken = null;
+    const call = () => {
+      sentToken = this.hasFreshSession() ? this.session.access_token : null;
+      return this.request(
+        `${this.url}/rest/v1/rpc/${fnName}`,
+        { method: 'POST', headers: this.getHeaders(), body: JSON.stringify(params) },
+        timeoutMs
+      );
+    };
 
     let res;
     try {
       res = await call();
-      if (res.status === 401 && this.session) {
-        // Token recusado (expirou antes do previsto): força a renovação e repete uma vez
-        this.markSessionExpired();
-        await this.ensureSession();
+      if (res.status === 401 && sentToken) {
+        // Token recusado (expirou antes do previsto): renova e repete uma vez
+        const userBefore = this.session?.user_id || null;
+        this.rejectedAccessToken = sentToken;
+        const renewed = await this.ensureSession();
+        if (!renewed) {
+          // Sem sessão nova não há o que repetir: sem token a chamada só voltaria outro 401
+          throw this.makeError(
+            this.lastAuthFailure === 'network' ? 'NETWORK' : 'AUTH_UNAVAILABLE',
+            `Sessão não renovada (${fnName})`
+          );
+        }
+        if (userBefore && renewed.user_id && renewed.user_id !== userBefore) {
+          // A sessão antiga foi extinta e esta já é outra conta: a ação pedida era da conta anterior
+          throw this.makeError('AUTH_REJECTED', `Conta de jogo substituída (${fnName})`, 401);
+        }
         res = await call();
       }
     } catch (e) {
-      const err = new Error(`Sem conexão com o servidor (${fnName})`);
-      err.code = 'NETWORK';
-      err.status = 0;
-      throw err;
+      // Erros nossos (makeError) têm code em texto; AbortError e afins têm code numérico ou nenhum
+      if (typeof e?.code === 'string') throw e;
+      throw this.makeError('NETWORK', `Sem conexão com o servidor (${fnName})`);
     }
     if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
+      const errData = res.data && typeof res.data === 'object' ? res.data : {};
       const message = String(errData.message || '');
       const tagged = /^([A-Z][A-Z0-9_]+):\s*([\s\S]*)$/.exec(message);
       const err = new Error(message || `Erro RPC (${fnName})`);
@@ -234,19 +292,18 @@ class NeonDropCommercialAdapter {
       }
       throw err;
     }
-    return await res.json();
+    // 200 com corpo cortado ou trocado no caminho: não dá para saber o que o servidor respondeu
+    if (!res.parsed) throw this.makeError('NETWORK', `Resposta ilegível do servidor (${fnName})`);
+    return res.data;
   }
 
   // RPC de jogo: só funciona com conta autenticada (auth.uid() é o dono do perfil)
-  async gameRpc(fnName, params = {}) {
+  async gameRpc(fnName, params = {}, options = {}) {
     const session = await this.ensureSession();
     if (!session) {
-      const err = new Error('Conta de jogo indisponível');
-      err.code = this.lastAuthFailure === 'network' ? 'NETWORK' : 'AUTH_UNAVAILABLE';
-      err.status = 0;
-      throw err;
+      throw this.makeError(this.lastAuthFailure === 'network' ? 'NETWORK' : 'AUTH_UNAVAILABLE', 'Conta de jogo indisponível');
     }
-    return await this.rpc(fnName, params);
+    return await this.rpc(fnName, params, options);
   }
 
   // --------------------------------------------------------------------------
@@ -254,7 +311,8 @@ class NeonDropCommercialAdapter {
   // Toda resposta traz `profile` (saldo, $/s, XP, estatísticas) recalculado no servidor.
   // --------------------------------------------------------------------------
   getMyState() {
-    return this.gameRpc('get_my_state_rpc');
+    // Resposta grande (inventário inteiro): prazo dobrado
+    return this.gameRpc('get_my_state_rpc', {}, { timeoutMs: this.requestTimeoutMs * 2 });
   }
 
   openCase(caseId, count) {
@@ -290,7 +348,8 @@ class NeonDropCommercialAdapter {
   }
 
   importLegacySave(save) {
-    return this.gameRpc('import_legacy_save_rpc', { p_save: save });
+    // Envio grande (até ~300 KB de save antigo): em conexão lenta o prazo base não basta
+    return this.gameRpc('import_legacy_save_rpc', { p_save: save }, { timeoutMs: this.requestTimeoutMs * 4 });
   }
 
   startGridshot() {
@@ -315,16 +374,24 @@ class NeonDropCommercialAdapter {
       'player_id,callsign,prestige_level,mil_level,xp,net_worth,passive_rate_per_sec,unique_skins_count,platinum_cases_count,best_gridshot_score,best_drop_value,golds_unboxed,cases_opened,updated_at';
     // Leitura pública: não cria conta anônima só para quem está olhando o placar
     const get = (path) =>
-      this.fetchWithTimeout(`${this.url}/rest/v1/${path}`, { method: 'GET', headers: this.getHeaders(), cache: 'no-store' });
+      this.request(`${this.url}/rest/v1/${path}`, { method: 'GET', headers: this.getHeaders(), cache: 'no-store' });
 
-    // Schema novo: view pública, só com quem registrou Callsign ou já abriu alguma caixa
-    let res = await get(
-      `leaderboard_global_view?select=${cols},is_vip&or=(callsign.not.is.null,cases_opened.gt.0)&order=prestige_level.desc,net_worth.desc&limit=200`
-    );
-    // Schema antigo (sem a view): lê a tabela, que lá ainda tinha leitura pública
-    if (!res.ok) res = await get(`profiles?select=${cols}&limit=100`);
-    if (!res.ok) return null;
-    const rows = await res.json();
+    let rows;
+    try {
+      // Schema novo: view pública, só com quem registrou Callsign ou já abriu alguma caixa
+      let res = await get(
+        `leaderboard_global_view?select=${cols},is_vip&or=(callsign.not.is.null,cases_opened.gt.0)&order=prestige_level.desc,net_worth.desc&limit=200`
+      );
+      // Só quando a view NÃO EXISTE (schema antigo) lê a tabela, que lá tinha leitura pública.
+      // No schema atual a tabela devolve apenas a linha do próprio jogador: usá-la num erro
+      // passageiro da view trocaria o placar global por um placar de uma pessoa só.
+      const viewMissing = res.status === 404 || ['PGRST205', '42P01'].includes(res.data?.code);
+      if (!res.ok && viewMissing) res = await get(`profiles?select=${cols}&limit=100`);
+      if (!res.ok || !Array.isArray(res.data)) return null;
+      rows = res.data;
+    } catch (e) {
+      return null;
+    }
     return rows.map((r) => ({
       playerId: r.player_id,
       callsign: r.callsign || ('Operador-' + String(r.player_id || '0000').slice(-4).toUpperCase()),
